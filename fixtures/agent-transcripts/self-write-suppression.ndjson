@@ -1,0 +1,9 @@
+{"v":1,"t":"meta","transcript":"self-write-suppression","recordedOn":"macos 26.5.1 arm64","synthetic":true,"note":"hand written 2026-09-02"}
+{"dir":"in","line":{"v":1,"t":"req","id":"*","method":"hello","params":{"hostVersion":"*"}}}
+{"dir":"out","line":{"v":1,"t":"res","id":"*","ok":true,"result":{"wireMajor":1,"agent":"macos","agentVersion":"0.1.0","platformVersion":"26.5.1","tier":"A","clipboardWatch":"changecount-poll","paste":"none","hotkey":"carbon","focusApp":true,"concealedTypeHints":true,"maxRepBytes":20971520,"chunkThresholdBytes":65536,"missingTools":[]}}}
+{"dir":"in","line":{"v":1,"t":"req","id":"*","method":"watch.start","params":{"intervalMs":500}}}
+{"dir":"out","line":{"v":1,"t":"res","id":"*","ok":true,"result":{"watching":true,"intervalMs":500}}}
+{"dir":"in","line":{"v":1,"t":"req","id":"*","method":"write","params":{"reps":"*","transient":true}}}
+{"dir":"out","line":{"v":1,"t":"res","id":"*","ok":true,"result":{"changeToken":"377"}}}
+{"dir":"out","delayMs":500,"line":{"v":1,"t":"ev","event":"clipboard.changed","data":{"changeCount":377,"hints":["auto-generated"],"reps":[{"mime":"text/plain","uti":"public.utf8-plain-text","byteLength":11,"sha256":"sha256-uU0nuZNNPgilLlLX2n2r-sSE7-N6U4DukIj3rOLvzek","inline":"aGVsbG8gd29ybGQ="}],"frontmostBundleId":"app.cairn.desktop","frontmostName":"Cairn","attributionConfidence":"heuristic"}}}
+{"dir":"out","delayMs":500,"line":{"v":1,"t":"ev","event":"clipboard.changed","data":{"changeCount":378,"hints":[],"reps":[{"mime":"text/plain","uti":"public.utf8-plain-text","byteLength":13,"sha256":"sha256-Jg2T_7wD4zcr6rARUrUw-_aPUtJDcV-f9pas_IjKbiE","inline":"dHlwZWQgYnkgaGFuZA=="}],"frontmostBundleId":"com.apple.TextEdit","frontmostName":"TextEdit","attributionConfidence":"heuristic"}}}
