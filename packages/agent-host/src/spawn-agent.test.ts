@@ -257,4 +257,18 @@ it('reassembles a >64 KiB representation off the real pipe and emits chunk progr
     await agent.dispose()
   }
 })
+
+it('refuses to start an agent whose hello reports a different wire major', async () => {
+  const { agent, lines } = stub('wrong-wire')
+  await expect(agent.start()).rejects.toThrow(
+    /refusing to start the macos agent — hello failed \(E_WIRE_MAJOR\): agent reports wire major 2, host speaks 1/,
+  )
+  expect(lines.map((l) => l.event)).toContain('agent.wire-major-mismatch')
+  // A refused agent is never restarted: it will be just as wrong next time.
+  await expect(agent.request('read', { changeCount: 1 })).resolves.toMatchObject({
+    ok: false,
+    code: 'E_AGENT_EXIT',
+  })
+  await agent.dispose()
+})
 })

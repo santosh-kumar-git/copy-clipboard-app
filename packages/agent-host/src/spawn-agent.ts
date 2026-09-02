@@ -60,7 +60,7 @@ export function createAgentCore(opts: {
   /** The wire is unusable: the transport must replace or fail the child. */
   onFatal: (code: ErrorCode) => void
 }): AgentCore {
-  const { clock, logger, send } = opts
+  const { clock, logger, send, onFatal } = opts
   const correlator: Correlator = createCorrelator({ clock, logger })
   const listeners: { [E in keyof AgentEventMap]: Set<(p: AgentEventMap[E]) => void> } = {
     'clipboard.changed': new Set(),
@@ -80,6 +80,7 @@ export function createAgentCore(opts: {
   })
 
   let consecutiveParseFailures = 0
+  let helloId: string | null = null
   let lastWatchIntervalMs: number | null = null
   let lastAccelerator: string | null = null
 
@@ -110,6 +111,17 @@ export function createAgentCore(opts: {
         return
       }
       if (l.t === 'res') {
+        if (l.id === helloId && l.ok === true && l.result['wireMajor'] !== WIRE_MAJOR) {
+          // Refuse the agent outright: a different wire major means every later field is a guess.
+          logger.error('agent.wire-major-mismatch', { code: 'E_WIRE_MAJOR' })
+          correlator.fail(
+            l.id,
+            'E_WIRE_MAJOR',
+            `agent reports wire major ${String(l.result['wireMajor'])}, host speaks ${WIRE_MAJOR}`,
+          )
+          onFatal('E_WIRE_MAJOR')
+          return
+        }
         correlator.settle(l)
         return
       }
@@ -139,6 +151,7 @@ export function createAgentCore(opts: {
       timeoutMs = AGENT_REQUEST_TIMEOUT_MS,
     ): Promise<Result<AgentResult<M>>> {
       const id = correlator.nextId()
+      if (method === 'hello') helloId = id
       const line = JSON.stringify({ v: WIRE_MAJOR, t: 'req', id, method, params }) + '\n'
       const promise = correlator.register<AgentResult<M>>(id, method, timeoutMs)
       const written = send(line)
@@ -237,8 +250,10 @@ export function spawnAgent(opts: SpawnAgentOptions): ClipboardAgent {
     clock,
     logger,
     send,
-    onFatal: () => {
-      // Given a fatal wire error the child is replaced; wired in Steps 41 and 45.
+    onFatal: (code) => {
+      logger.error('agent.exited', { code })
+      if (code === 'E_WIRE_MAJOR') failed = true
+      killChild()
     },
   })
 
