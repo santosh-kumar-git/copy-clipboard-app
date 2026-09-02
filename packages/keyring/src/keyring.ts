@@ -20,7 +20,14 @@ import {
   type Result,
 } from '@cairn/protocol'
 import { probeBackend, type BackendReport, type SafeStorageLike } from './backend'
-import { MASTER_KEY_BYTES } from './passphrase'
+import {
+  deriveKeyFromPassphrase,
+  keyVerifier,
+  MASTER_KEY_BYTES,
+  MIN_PASSPHRASE_CHARS,
+  newSalt,
+  verifierMatches,
+} from './passphrase'
 
 export const KEY_FILE_VERSION = 1
 
@@ -49,6 +56,7 @@ export interface Keyring {
   getMode(): KeyringMode
   probeBackend(): BackendReport
   getOrCreateMasterKey(): Result<Buffer>
+  unlockWithPassphrase(passphrase: string): Result<Buffer>
 }
 
 const REKEY_HINT =
@@ -154,6 +162,13 @@ export function createKeyring(opts: KeyringOptions): Keyring {
       return err('E_KEYRING_UNAVAILABLE', `${STORE_KEY_FILE} is not a Cairn key file. ${REKEY_HINT}`)
     }
 
+    if (read.state === 'ok' && read.file.mode === 'passphrase') {
+      return err(
+        'E_KEYRING_LOCKED',
+        `${STORE_KEY_FILE} is passphrase-wrapped. Call unlockWithPassphrase() instead.`,
+      )
+    }
+
     if (read.state === 'ok') {
       const wrapped = read.file.wrapped
       if (wrapped === null) {
@@ -187,9 +202,74 @@ export function createKeyring(opts: KeyringOptions): Keyring {
     return ok(key)
   }
 
+  function unlockWithPassphrase(passphrase: string): Result<Buffer> {
+    if (masterKey !== null) {
+      return mode === 'passphrase'
+        ? ok(masterKey)
+        : err('E_KEYRING_UNAVAILABLE', 'already unlocked in os-keyring mode; call lock() first')
+    }
+    if (passphrase.normalize('NFKC').length < MIN_PASSPHRASE_CHARS) {
+      return err(
+        'E_KEYRING_BAD_PASSPHRASE',
+        `passphrase must be at least ${MIN_PASSPHRASE_CHARS} characters`,
+      )
+    }
+
+    ensureDir0700(dir)
+    const read = readKeyFile()
+
+    if (read.state === 'malformed') {
+      logger.error('keyring.unlock-failed', { ok: false })
+      return err('E_KEYRING_UNAVAILABLE', `${STORE_KEY_FILE} is not a Cairn key file. ${REKEY_HINT}`)
+    }
+
+    if (read.state === 'ok' && read.file.mode !== 'passphrase') {
+      return err(
+        'E_KEYRING_UNAVAILABLE',
+        `${STORE_KEY_FILE} is wrapped by the OS keyring, not a passphrase. Call getOrCreateMasterKey() instead.`,
+      )
+    }
+
+    if (read.state === 'ok') {
+      const { salt, verifier } = read.file
+      if (salt === null || verifier === null) {
+        logger.error('keyring.unlock-failed', { ok: false })
+        return err('E_KEYRING_UNAVAILABLE', `${STORE_KEY_FILE} has no salt or verifier. ${REKEY_HINT}`)
+      }
+      const candidate = deriveKeyFromPassphrase(passphrase, Buffer.from(salt, 'base64'))
+      if (!verifierMatches(candidate, Buffer.from(verifier, 'base64'))) {
+        candidate.fill(0) // never leave a wrong derivation lying in memory
+        logger.warn('keyring.unlock-failed', { ok: false })
+        return err('E_KEYRING_BAD_PASSPHRASE', `passphrase does not match ${STORE_KEY_FILE}`)
+      }
+      masterKey = candidate
+      mode = 'passphrase'
+      logger.info('keyring.mode', { mode })
+      return ok(candidate)
+    }
+
+    const salt = newSalt()
+    const key = deriveKeyFromPassphrase(passphrase, salt)
+    writeFile0600(
+      keyPath,
+      serialiseKeyFile({
+        v: KEY_FILE_VERSION,
+        mode: 'passphrase',
+        salt: salt.toString('base64'),
+        wrapped: null,
+        verifier: keyVerifier(key).toString('base64'),
+      }),
+    )
+    masterKey = key
+    mode = 'passphrase'
+    logger.info('keyring.mode', { mode })
+    return ok(key)
+  }
+
   return {
     getMode: () => mode,
     probeBackend: () => probeBackend(safeStorage, platform),
     getOrCreateMasterKey,
+    unlockWithPassphrase,
   }
 }

@@ -57,6 +57,21 @@ describe('getOrCreateMasterKey', () => {
     expect(bytes.includes(created.value)).toBe(false)
     expect(bytes.toString('utf8').includes(created.value.toString('base64'))).toBe(false)
   })
+
+  it('reports E_KEYRING_LOCKED rather than overwriting a passphrase key.bin', () => {
+    const safeStorage = createFakeSafeStorage()
+    const first = createKeyring({ safeStorage, platform: 'macos', dir, logger })
+    expect(first.unlockWithPassphrase(PASSPHRASE).ok).toBe(true)
+    const before = readFileSync(join(dir, STORE_KEY_FILE))
+
+    const relaunched = createKeyring({ safeStorage, platform: 'macos', dir, logger })
+    const result = relaunched.getOrCreateMasterKey()
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('E_KEYRING_LOCKED')
+    expect(relaunched.getMode()).toBe('locked')
+    expect(readFileSync(join(dir, STORE_KEY_FILE)).equals(before)).toBe(true)
+  })
 })
 
 describe('ensureDir0700 / writeFile0600', () => {
@@ -136,4 +151,77 @@ it('refuses when encryption is unavailable and never touches the encryption surf
   expect(keyring.getMode()).toBe('locked')
   expect(safeStorage.calls).toEqual(['isEncryptionAvailable'])
 })
+})
+
+describe('unlockWithPassphrase', () => {
+  it('creates a passphrase key.bin with a salt and no wrapped key', () => {
+    const keyring = createKeyring({
+      safeStorage: createFakeSafeStorage({ backend: 'basic_text' }),
+      platform: 'linux',
+      dir,
+      logger,
+    })
+    const result = keyring.unlockWithPassphrase(PASSPHRASE)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.length).toBe(32)
+    expect(keyring.getMode()).toBe('passphrase')
+
+    const file = JSON.parse(readFileSync(join(dir, STORE_KEY_FILE), 'utf8')) as Record<string, unknown>
+    expect(file['mode']).toBe('passphrase')
+    expect(file['wrapped']).toBe(null)
+    expect(typeof file['salt']).toBe('string')
+    expect(typeof file['verifier']).toBe('string')
+  })
+
+  it('derives the same key from the same passphrase after a relaunch', () => {
+    const safeStorage = createFakeSafeStorage({ backend: 'basic_text' })
+    const first = createKeyring({ safeStorage, platform: 'linux', dir, logger }).unlockWithPassphrase(PASSPHRASE)
+    const second = createKeyring({ safeStorage, platform: 'linux', dir, logger }).unlockWithPassphrase(PASSPHRASE)
+    expect(first.ok && second.ok).toBe(true)
+    if (!first.ok || !second.ok) return
+    expect(second.value.equals(first.value)).toBe(true)
+  })
+
+  it('rejects a wrong passphrase without destroying key.bin', () => {
+    const safeStorage = createFakeSafeStorage({ backend: 'basic_text' })
+    expect(createKeyring({ safeStorage, platform: 'linux', dir, logger }).unlockWithPassphrase(PASSPHRASE).ok).toBe(true)
+    const before = readFileSync(join(dir, STORE_KEY_FILE))
+
+    const keyring = createKeyring({ safeStorage, platform: 'linux', dir, logger })
+    const result = keyring.unlockWithPassphrase('wrong horse battery staple')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('E_KEYRING_BAD_PASSPHRASE')
+    expect(keyring.getMode()).toBe('locked')
+    expect(readFileSync(join(dir, STORE_KEY_FILE)).equals(before)).toBe(true)
+    expect(keyring.unlockWithPassphrase(PASSPHRASE).ok).toBe(true)
+  })
+
+  it('rejects a passphrase under 8 characters before touching the disk', () => {
+    const keyring = createKeyring({
+      safeStorage: createFakeSafeStorage({ backend: 'basic_text' }),
+      platform: 'linux',
+      dir,
+      logger,
+    })
+    const result = keyring.unlockWithPassphrase('short')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('E_KEYRING_BAD_PASSPHRASE')
+    expect(existsSync(join(dir, STORE_KEY_FILE))).toBe(false)
+  })
+
+  it('refuses to convert an os-keyring key.bin into a passphrase one', () => {
+    const safeStorage = createFakeSafeStorage()
+    expect(createKeyring({ safeStorage, platform: 'macos', dir, logger }).getOrCreateMasterKey().ok).toBe(true)
+    const before = readFileSync(join(dir, STORE_KEY_FILE))
+
+    const keyring = createKeyring({ safeStorage, platform: 'macos', dir, logger })
+    const result = keyring.unlockWithPassphrase(PASSPHRASE)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('E_KEYRING_UNAVAILABLE')
+    expect(readFileSync(join(dir, STORE_KEY_FILE)).equals(before)).toBe(true)
+  })
 })
