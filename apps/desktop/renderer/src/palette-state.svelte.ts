@@ -1,4 +1,14 @@
-import type { ItemKind } from '@cairn/protocol'
+import type { Cancel, Clock, ItemKind, ItemSummary } from '@cairn/protocol'
+import {
+  parseHistoryChanged,
+  parseHotkeyStatus,
+  parsePaletteShown,
+  parseToast,
+  type CairnBridge,
+  type CopyReason,
+  type HotkeyStatus,
+  type ToastPayload,
+} from './api'
 
 /** Fixed row geometry. jsdom has no layout — `clientHeight` is always 0 and `scrollIntoView` does
  *  not exist — so nothing in the palette may be measured from the DOM. */
@@ -127,4 +137,270 @@ export function secretExpiryLabel(expiresAt: number | null, nowMs: number): stri
   if (leftMs <= 0) return 'expired'
   const seconds = Math.ceil(leftMs / 1_000)
   return seconds >= 60 ? `expires in ${Math.ceil(seconds / 60)}m` : `expires in ${seconds}s`
+}
+
+export interface VisibleRow {
+  readonly index: number
+  readonly top: number
+  readonly item: ItemSummary | null
+  readonly ranges: readonly number[]
+}
+
+export interface PaletteDeps {
+  readonly api: CairnBridge
+  readonly clock: Clock
+}
+
+export class PaletteState {
+  query = $state('')
+  selectedIndex = $state(0)
+  windowStart = $state(0)
+  total = $state(0)
+  mode: 'recent' | 'search' = $state('recent')
+  hotkeyStatus: HotkeyStatus = $state('active')
+  hotkeyAccelerator = $state('')
+  toast: ToastPayload | null = $state(null)
+  statusText: string | null = $state(null)
+  previewText = $state('')
+  previewMime: 'text/plain' | 'text/html' = $state('text/plain')
+  shownAt = $state(0)
+  nowMs = $state(0)
+  /** At most FETCH_SPAN summaries — the renderer never holds the whole history. */
+  rows: (ItemSummary | null)[] = $state([])
+  rowsOffset = $state(0)
+  rangesByIndex: number[][] = $state([])
+
+  /** The promise of the most recent background work. The UI never awaits it; tests do. */
+  pending: Promise<unknown> = Promise.resolve()
+
+  readonly #deps: PaletteDeps
+  readonly #unsubs: (() => void)[] = []
+  #listSeq = 0
+  #previewSeq = 0
+  #cancelToast: Cancel | null = null
+
+  constructor(deps: PaletteDeps) {
+    this.#deps = deps
+  }
+
+  visibleRows: VisibleRow[] = $derived.by(() => {
+    const { start, end } = visibleRange(this.windowStart, this.total)
+    const out: VisibleRow[] = []
+    for (let i = start; i < end; i++) {
+      out.push({
+        index: i,
+        top: i * ROW_HEIGHT_PX,
+        item: this.rowAt(i),
+        ranges: this.rangesByIndex[i] ?? [],
+      })
+    }
+    return out
+  })
+
+  get selectedItem(): ItemSummary | null {
+    return this.rowAt(this.selectedIndex)
+  }
+
+  get loadedRowCount(): number {
+    return this.rows.length
+  }
+
+  rowAt(index: number): ItemSummary | null {
+    const local = index - this.rowsOffset
+    if (local < 0 || local >= this.rows.length) return null
+    return this.rows[local] ?? null
+  }
+
+  async start(): Promise<void> {
+    const { api } = this.#deps
+    this.#unsubs.push(
+      api.onHotkeyStatus((raw) => {
+        const p = parseHotkeyStatus(raw)
+        if (p === null) return
+        this.hotkeyStatus = p.status
+        this.hotkeyAccelerator = p.accelerator
+      }),
+      api.onToast((raw) => {
+        const p = parseToast(raw)
+        if (p === null) return
+        this.toast = p
+      }),
+      api.onHistoryChanged((raw) => {
+        const p = parseHistoryChanged(raw)
+        if (p === null) return
+        if (this.mode === 'recent') this.pending = this.reload()
+      }),
+      api.onPaletteShown((raw) => {
+        const p = parsePaletteShown(raw)
+        if (p === null) return
+        // Main re-shows the same window, so "opening the palette" is an event, not a mount.
+        this.shownAt = p.shownAt
+        this.query = ''
+        this.mode = 'recent'
+        this.selectedIndex = 0
+        this.windowStart = 0
+        this.toast = null
+        this.pending = this.reload()
+      }),
+    )
+    await this.reload()
+  }
+
+  dispose(): void {
+    for (const un of this.#unsubs.splice(0)) un()
+    this.#cancelToast?.()
+    this.#cancelToast = null
+  }
+
+  async reload(): Promise<void> {
+    this.mode = 'recent'
+    this.nowMs = this.#deps.clock.now()
+    this.rowsOffset = 0
+    this.rows = []
+    this.rangesByIndex = []
+    await this.#fetchWindow(0)
+    await this.loadPreview()
+  }
+
+  async setQuery(q: string): Promise<void> {
+    this.query = q
+    this.selectedIndex = 0
+    this.windowStart = 0
+    if (q.trim().length === 0) {
+      await this.reload()
+      return
+    }
+    this.mode = 'search'
+    const seq = ++this.#listSeq
+    try {
+      const res = await this.#deps.api.search({ q, limit: SEARCH_LIMIT })
+      if (seq !== this.#listSeq) return
+      this.rows = res.results.map((r) => r.item)
+      this.rangesByIndex = res.results.map((r) => [...r.ranges])
+      this.rowsOffset = 0
+      this.total = res.results.length
+      this.statusText = null
+    } catch {
+      if (seq !== this.#listSeq) return
+      this.statusText = LOAD_FAILED_TEXT
+    }
+    await this.loadPreview()
+  }
+
+  moveSelection(key: NavKey): void {
+    this.selectedIndex = nextIndex(this.selectedIndex, key, this.total)
+    this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total)
+    this.pending = Promise.all([this.ensureLoaded(), this.loadPreview()])
+  }
+
+  setScrollTop(px: number): void {
+    const maxStart = Math.max(0, this.total - VISIBLE_ROWS)
+    this.windowStart = Math.max(0, Math.min(Math.floor(px / ROW_HEIGHT_PX), maxStart))
+    this.pending = this.ensureLoaded()
+  }
+
+  async ensureLoaded(): Promise<void> {
+    if (this.mode !== 'recent') return
+    const { start, end } = visibleRange(this.windowStart, this.total)
+    if (start >= this.rowsOffset && end <= this.rowsOffset + this.rows.length) return
+    await this.#fetchWindow(Math.max(0, start))
+  }
+
+  async #fetchWindow(offset: number): Promise<void> {
+    const seq = ++this.#listSeq
+    try {
+      const res = await this.#deps.api.list({ limit: FETCH_SPAN, offset, pinnedOnly: false })
+      if (seq !== this.#listSeq) return
+      this.rows = [...res.items]
+      this.rowsOffset = offset
+      this.total = res.total
+      this.rangesByIndex = []
+      this.statusText = null
+      if (this.selectedIndex >= this.total) this.selectedIndex = Math.max(0, this.total - 1)
+    } catch {
+      if (seq !== this.#listSeq) return
+      this.statusText = LOAD_FAILED_TEXT
+    }
+  }
+
+  async loadPreview(): Promise<void> {
+    const item = this.selectedItem
+    if (item === null) {
+      this.previewText = ''
+      this.previewMime = 'text/plain'
+      return
+    }
+    const seq = ++this.#previewSeq
+    try {
+      const res = await this.#deps.api.preview({ id: item.id })
+      if (seq !== this.#previewSeq) return
+      this.previewText = res.text
+      // `text` is ALWAYS plain text: for an HTML item it is the HTML *source*, and `isHtmlSource`
+      // only labels the pane. Nothing here ever becomes markup.
+      this.previewMime = res.isHtmlSource ? 'text/html' : 'text/plain'
+    } catch {
+      if (seq !== this.#previewSeq) return
+      this.previewText = ''
+      this.previewMime = 'text/plain'
+    }
+  }
+
+  async recall(): Promise<void> {
+    const item = this.selectedItem
+    if (item === null) return
+    try {
+      const res = await this.#deps.api.copy({ id: item.id })
+      // M1 has no synthetic paste: the toast IS the outcome, and it is exactly the M2
+      // Accessibility-denied degraded mode (spec §6).
+      this.#showToast({ text: RECALL_TOAST_TEXT[res.reason], tone: 'info' })
+      this.#cancelToast = this.#deps.clock.setTimeout(() => {
+        void this.close()
+      }, TOAST_MS)
+    } catch {
+      this.#showToast({ text: RECALL_FAILED_TEXT, tone: 'warn' })
+    }
+  }
+
+  async togglePin(): Promise<void> {
+    const item = this.selectedItem
+    if (item === null) return
+    // Spec §11 control 5: secrets are exempt from pinning. Refusing here, with a reason, beats
+    // sending an IPC we know will fail.
+    if (item.flags.includes('secret')) {
+      this.#showToast({ text: SECRET_PIN_REFUSED_TEXT, tone: 'warn' })
+      return
+    }
+    try {
+      await this.#deps.api.pin({ id: item.id, pinned: !item.pinned })
+    } catch {
+      this.#showToast({ text: LOAD_FAILED_TEXT, tone: 'warn' })
+      return
+    }
+    await this.reload()
+  }
+
+  async removeSelected(): Promise<void> {
+    const item = this.selectedItem
+    if (item === null) return
+    try {
+      await this.#deps.api.remove({ id: item.id })
+    } catch {
+      this.#showToast({ text: LOAD_FAILED_TEXT, tone: 'warn' })
+      return
+    }
+    await this.reload()
+  }
+
+  async close(): Promise<void> {
+    this.#cancelToast?.()
+    this.#cancelToast = null
+    this.toast = null
+    await this.#deps.api.close()
+  }
+
+  #showToast(t: ToastPayload): void {
+    this.#cancelToast?.()
+    this.#cancelToast = null
+    this.toast = t
+  }
 }
