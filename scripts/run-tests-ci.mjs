@@ -13,7 +13,9 @@
 // called explicitly, so nothing outlives the decision.
 import { execSync, spawn } from 'node:child_process'
 
-const TIMEOUT_MS = Number(process.env['CAIRN_TEST_TIMEOUT_MS'] ?? 480_000)
+// The suite finishes in ~45s on the runner, so waiting eight minutes for the dump wastes a cycle
+// per attempt. 150s is comfortably past a slow-but-working run and close enough to notice.
+const TIMEOUT_MS = Number(process.env['CAIRN_TEST_TIMEOUT_MS'] ?? 150_000)
 
 const sh = (cmd) => {
   try {
@@ -44,8 +46,14 @@ const killTree = () => {
 const timer = setTimeout(() => {
   // GitHub folds these, and ::error:: surfaces in the run summary rather than only the log.
   console.error(`::error::vitest produced no summary within ${TIMEOUT_MS / 1000}s — dumping state`)
-  console.error('--- process tree ---')
+  // The one file that never reports is packages/agent-host/src/spawn-agent.test.ts, which spawns
+  // real `node -e` stub agents. So the tree is the smoking gun: a surviving `node -e` stub means a
+  // stub outlived its dispose(), while a worker in state `Z`/`U` with no stub means the worker itself
+  // died and vitest is waiting for a result that will never arrive. `sample` says where it is parked.
+  console.error('--- process tree (look for `node -e` stubs and worker state) ---')
   console.error(sh("ps -Ao pid,ppid,stat,etime,command | grep -iE 'vitest|node|swift|Electron|cairn' | grep -v grep"))
+  console.error('--- vm/memory (a killed worker usually means pressure) ---')
+  console.error(sh('vm_stat | head -8'))
   for (const pid of sh('pgrep -f vitest').split('\n').filter(Boolean)) {
     console.error(`--- open files, pid ${pid} ---`)
     console.error(sh(`lsof -p ${pid} | tail -30`))
