@@ -93,14 +93,14 @@ describe('createBlobStore', () => {
     if (!put.ok) throw new Error('unreachable')
     const file = join(blobDir, readdirSync(blobDir)[0] as string)
     const body = readFileSync(file)
-    body[body.length - 20] ^= 0xff
+    body.writeUInt8(body.readUInt8(body.length - 20) ^ 0xff, body.length - 20)
     writeFileSync(file, body)
     const got = blobs.get(put.value)
     expect(got.ok).toBe(false)
     if (got.ok) throw new Error('unreachable')
     expect(got.code).toBe('E_STORE_DECRYPT')
     const nonceTampered = readFileSync(file)
-    nonceTampered[0] ^= 0xff
+    nonceTampered.writeUInt8(nonceTampered.readUInt8(0) ^ 0xff, 0)
     writeFileSync(file, nonceTampered)
     expect(blobs.get(put.value).ok).toBe(false)
   })

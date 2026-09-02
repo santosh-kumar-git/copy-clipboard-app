@@ -14,7 +14,7 @@ import {
   type StoreEvent,
   type StoreEventKind,
 } from '@cairn/protocol'
-import { CHAIN_GENESIS, chainNext, chainTip } from './chain'
+import { CHAIN_GENESIS, chainNext, chainTip, createChainVerifier } from './chain'
 import { createBlobStore, type BlobStore } from './blobs'
 import { appendLine0600, dataDirLayout, ensureDir0700, fsyncPath, writeFile0600, type DataDirLayout } from './paths'
 import { ANCHOR_AAD_SEQ, openRecord, openRecordAnyKind, sealRecord } from './record'
@@ -247,6 +247,7 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
 
   async function* readAll(): AsyncIterable<Result<StoreEvent>> {
     const lines = readLines()
+    const chain = createChainVerifier()
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
       if (line === undefined) return
@@ -274,6 +275,11 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
       }
       if (payload.value.seq !== anchorSeq + i) {
         yield err('E_STORE_CORRUPT', `line ${i}: seq ${payload.value.seq} != expected ${anchorSeq + i}`)
+        return
+      }
+      const linked = chain.check(i, line, payload.value.prev)
+      if (!linked.ok) {
+        yield linked
         return
       }
       const event = toStoreEvent(payload.value, i)
