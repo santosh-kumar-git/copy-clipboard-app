@@ -36,3 +36,74 @@ Windows and Linux rows are filled in at M4 and are listed here so the shape of t
   reports `~/Library/Application Support/Electron`.
 - M1 needs **zero TCC grants**: NSPasteboard reads, NSWorkspace attribution and Carbon hotkeys are
   all permission-free.
+
+## Spike (a): does `BrowserWindow({type:'panel'})` still yield a real NSPanel on Electron 44?
+
+Run on Electron 44.1.1 / macOS 26.5.1 via `spikes/electron-panel`, three configurations, with the
+frontmost app observed by a permission-free Swift probe (`NSWorkspace.frontmostApplication` +
+`CGWindowListCopyWindowInfo`, never `kCGWindowName`).
+
+| run | frontmost after `showInactive()` | frontmost after `focus()` | keys reached the window | in Cmd-Tab | CG layer |
+|---|---|---|---|---|---|
+| `PANEL=1 POLICY=accessory` | `com.apple.Terminal` — unchanged | `com.apple.Terminal` — unchanged | not typed during this run | not observed (see below) | 1000 |
+| `PANEL=0 POLICY=accessory` | `com.apple.Terminal` — unchanged | `com.apple.Terminal` — unchanged | **yes**, 8 keys logged | not observed (see below) | 1000 |
+| `PANEL=1 POLICY=regular` | `com.apple.Terminal` — unchanged | `com.apple.Terminal` — unchanged | **yes**, 7 keys logged | not observed (see below) | 1000 |
+
+**Answer: `type:'panel'` is not what keeps the app from stealing focus on Electron 44.** In all three
+configurations — including `PANEL=0` — `NSWorkspace.frontmostApplication` never became the Electron
+app, not even after an explicit `win.focus()`. Since the no-panel run behaves identically, the
+non-stealing cannot be attributed to NSPanel.
+
+The window still receives key events while another app is frontmost: runs 2 and 3 logged
+`key reached the window: …` for keystrokes typed while `frontmost=com.apple.Terminal`. That is the
+behaviour a palette wants (type into it without activating the app), and it is worth knowing it comes
+for free rather than from the panel type. It is also a live warning: this window grabs the keyboard
+as soon as it is shown, so never leave a debug build of it open.
+
+`layer=1000` in every run confirms `setAlwaysOnTop(true, 'screen-saver')` takes effect.
+
+**Consequences, per the decision written down before the spike ran:** the palette task may still pass
+`type:'panel'` (it costs nothing and Electron's typings accept `type?: string` unvalidated), but
+nothing may *depend* on it for focus behaviour. The M2 focus-restore ladder through the agent's
+`focus.capture` / `focus.restore` pair stays required — we did not earn the right to skip it by
+"never having taken focus". M1 is unaffected either way: Enter puts the item on the real clipboard and
+toasts `Copied — press Cmd+V`, which needs no focus trick.
+
+**Not yet answered, needs a human at the keyboard:** whether an entry appears in the Cmd-Tab switcher
+(run 1 vs run 3 — expected to be governed by `POLICY`, not `PANEL`). M3 makes `LSUIElement=1`
+permanent regardless, so nothing in M1 or M2 blocks on it.
+
+## Spike (b): does TCC attribute an Accessibility request to the Swift helper or the parent?
+
+`spikes/tcc-attribution/build/ax-probe` with no `--prompt`, which raises no dialog and grants nothing:
+
+```
+pid=2434
+executable=…/spikes/tcc-attribution/build/ax-probe
+parentBundle=none
+trustedBefore=false
+trustedWithPrompt=skipped (pass --prompt to raise the TCC dialog)
+```
+
+`trustedBefore=false` is the correct state for this repo and stays that way through all of M1.
+
+| run | dialog named | entry added to the Accessibility list | granted? |
+|---|---|---|---|
+| probe run directly from a shell | not run — needs a human to read a system dialog | none; `trustedBefore=false` and no entry exists | no |
+| probe spawned by an Electron parent | not run — needs a human to read a system dialog | none; nothing was prompted | no |
+
+**The attribution half is deliberately not run here.** It requires raising a real TCC dialog and
+reading which app name it names, and an agent must not click through a system security prompt on the
+owner's behalf. Run it yourself when M2 starts:
+
+```sh
+./spikes/tcc-attribution/build/ax-probe --prompt        # run 1: no Electron parent
+npx electron spikes/tcc-attribution                     # run 2: same probe, Electron parent
+```
+
+Read the dialog title each time, click **Deny** both times, and record the two app names here.
+**M1 and M2 must not depend on the answer** (spec §10): TCC keys grants to the code-signing
+designated requirement and falls back to path+cdhash when unsigned, and `CGEventPost` fails
+*silently* when untrusted — so M2's required default assumption is `AXIsProcessTrusted() == false`
+with `deliver()` returning `{result:'copied-manual', reason:'no-permission'}`. This spike decides only
+*where M2 points the user*, never whether the app works.
