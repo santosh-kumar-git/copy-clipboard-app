@@ -144,7 +144,10 @@ async function main(): Promise<void> {
 
   const agent = spawnAgent({
     platform: 'macos',
-    binPath: join(app.getAppPath(), 'agents', 'macos', 'build', AGENT_BIN_NAME),
+    // app.getAppPath() is <repo>/apps/desktop: that directory holds the only package.json with a
+    // `main`, so it is the app root Electron is given. The agent lives at the REPO root, two up.
+    // (M3 packaging moves it into Contents/Resources and revisits this one line.)
+    binPath: join(app.getAppPath(), '..', '..', 'agents', 'macos', 'build', AGENT_BIN_NAME),
     clock: systemClock,
     logger,
   })
@@ -178,8 +181,8 @@ async function main(): Promise<void> {
   const palette = createPaletteWindow({
     BrowserWindowCtor: BrowserWindow as never,
     mode,
-    preloadPath: join(app.getAppPath(), 'apps', 'desktop', 'out', 'preload', 'index.js'),
-    rendererIndexPath: join(app.getAppPath(), 'apps', 'desktop', 'out', 'renderer', 'index.html'),
+    preloadPath: join(app.getAppPath(), 'out', 'preload', 'index.js'),
+    rendererIndexPath: join(app.getAppPath(), 'out', 'renderer', 'index.html'),
     env: process.env,
     clock: systemClock,
     logger,
