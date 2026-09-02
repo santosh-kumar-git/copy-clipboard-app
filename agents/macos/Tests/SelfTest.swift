@@ -94,5 +94,108 @@ struct SelfTest {
     expectEqual(guardSplitter.droppedOverlongLines, 1, "an unterminated line over 1 MiB is dropped, not buffered")
     var emptySplitter = LineSplitter()
     expectEqual(emptySplitter.push(Data("\n\n".utf8)).count, 0, "empty lines are ignored")
+
+    // 5. the UTI -> mime allowlist
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["public.utf8-plain-text", "NSStringPboardType"]).map(\.mime),
+      ["text/plain"],
+      "a plain-text item yields exactly one text/plain plan and ignores the legacy alias")
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["public.png", "public.tiff"]).map(\.mime),
+      ["image/png"],
+      "png wins over tiff, and only one image rep is planned")
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["public.tiff", "com.adobe.pdf"]).first?.tiffToPng,
+      true,
+      "a tiff-only item is planned as a TIFF->PNG conversion")
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["public.tiff", "com.adobe.pdf"]).map(\.mime),
+      ["image/png"],
+      "tiff wins over pdf")
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["dyn.ah62d4rv4gu8zg55mrrxg23petzxg", "public.utf8-plain-text"]).map(\.uti),
+      ["public.utf8-plain-text"],
+      "a dyn.* UTI is never read")
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["public.utf8-plain-text", "org.chromium.source-url"]).map(\.mime),
+      ["text/plain", "text/x-source-url"],
+      "Chrome's source-url rides alongside the text, in that order")
+    expectEqual(
+      RepFilter.plan(forItemTypes: [HintUTI.concealed, "public.utf8-plain-text"]).map(\.mime),
+      ["text/plain"],
+      "the hint UTIs are markers, never representations")
+    expectEqual(
+      RepFilter.plan(forItemTypes: ["public.utf8-plain-text", "public.html", "public.rtf", "public.file-url"]).map(\.mime),
+      ["text/plain", "text/html", "text/rtf", "text/uri-list"],
+      "the plan order is frozen so two machines hash the same copy identically")
+
+    // 6. the concealed decision — the single most important branch in this file
+    expect(!Pasteboard.mayReadBytes(hints: [.concealed]), "a concealed hint forbids reading any byte")
+    expect(!Pasteboard.mayReadBytes(hints: [.transient, .concealed]), "concealed wins over other hints")
+    expect(Pasteboard.mayReadBytes(hints: [.transient]), "a transient hint alone still allows reading")
+    expect(Pasteboard.mayReadBytes(hints: []), "no hint allows reading")
+
+    // 7. the wedged-read escalation policy
+    expectEqual(ReadWatchdog.decide(elapsedMs: 1_999, strikes: 0), .ignore, "a read under 2 s is not wedged")
+    expectEqual(ReadWatchdog.decide(elapsedMs: 2_001, strikes: 0), .warn, "the first strike over 2 s only warns")
+    expectEqual(ReadWatchdog.decide(elapsedMs: 2_001, strikes: 1), .killProcess, "the second strike kills the process so the host restarts it")
+    expectEqual(ReadWatchdog.decide(elapsedMs: 60_000, strikes: 0), .warn, "even a very long first strike only warns once")
+
+    // 8. content hash, identical to @cairn/protocol's contentHash()
+    expectEqual(
+      contentHash(Data("hello".utf8)),
+      "sha256-LPJNul-wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ",
+      "contentHash matches the TypeScript vector for 'hello'")
+    expectEqual(
+      contentHash(Data("hello world".utf8)),
+      "sha256-uU0nuZNNPgilLlLX2n2r-sSE7-N6U4DukIj3rOLvzek",
+      "contentHash matches the transcript fixture vector for 'hello world'")
+    expectEqual(contentHash(Data()).count, 7 + 43, "a content hash is always sha256- plus 43 chars")
+
+    // 9. TIFF -> PNG, which happens at capture so nothing downstream ever sees a TIFF
+    let tiff = makeTiff(width: 8, height: 6)
+    expectEqual(Array(tiff.prefix(2)), [77, 77], "the input really is a TIFF (MM big-endian magic)")
+    guard let png = RepFilter.tiffToPng(tiff) else { return expect(false, "TIFF converts to PNG") }
+    expectEqual(Array(png.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10], "the converted bytes carry the PNG magic number")
+    expect(RepFilter.tiffToPng(Data("not an image".utf8)) == nil, "garbage does not convert")
+    // 10. chunk splitting. `Chunker.split` returns RAW `[Data]`, because RepChunkData.b64 is `Data`
+    //     and JSONEncoder base64s it on the way out — nothing here calls a base64 API for a payload.
+    let big = Data(repeating: 0x5A, count: 200_000)
+    let chunks = Chunker.split(big)
+    expectEqual(chunks.count, 7, "200 000 bytes split into 7 chunks of at most 32 768")
+    expectEqual(chunks[0].count, 32_768, "one full chunk carries exactly 32 768 raw bytes")
+    expectEqual(chunks[6].count, 3_392, "the last chunk carries the 3 392-byte remainder")
+    expectEqual(
+      chunks[0].base64EncodedString().count,
+      43_692,
+      "32 768 raw bytes become exactly 43 692 base64 characters on the wire, under Node's 64 KiB pipe watermark")
+    expectEqual(
+      chunks.reduce(0) { $0 + $1.count },
+      200_000,
+      "the chunks account for exactly the input length")
+    expect(Data(chunks.joined()) == big, "the chunks reassemble byte-for-byte")
+    expectEqual(Chunker.split(Data()).count, 0, "an empty representation produces no chunks")
+
+    // 11. the inline / stream threshold, which must match CHUNK_THRESHOLD_BYTES exactly
+    let small = Chunker.prepare(mime: "text/plain", uti: "public.utf8-plain-text", bytes: Data(repeating: 0x41, count: 65_535))
+    expect(small.rep.inline != nil && small.rep.repId == nil && small.stream == nil, "65 535 bytes travel inline")
+    let large = Chunker.prepare(mime: "text/plain", uti: "public.utf8-plain-text", bytes: Data(repeating: 0x41, count: 65_536))
+    expect(large.rep.inline == nil && large.rep.repId != nil && large.stream != nil, "65 536 bytes travel as a stream")
+    expectEqual(large.stream?.payloads.count, 2, "65 536 bytes is exactly two chunks")
+    expectEqual(large.rep.sha256, contentHash(Data(repeating: 0x41, count: 65_536)), "a streamed rep declares the hash of the whole representation")
+  }
+
+  static func makeTiff(width: Int, height: Int) -> Data {
+    let rep = NSBitmapImageRep(
+      bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+      samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+      bytesPerRow: width * 4, bitsPerPixel: 32)!
+    var seed: UInt32 = 0x9E37_79B9
+    let plane = rep.bitmapData!
+    for i in 0..<(width * height * 4) {
+      seed = seed &* 1_664_525 &+ 1_013_904_223
+      plane[i] = UInt8((seed >> 16) & 0xFF)
+    }
+    return rep.tiffRepresentation!
   }
 }
