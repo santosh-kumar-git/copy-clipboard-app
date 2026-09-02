@@ -7,13 +7,17 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
+  rmSync,
   writeSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import {
   err,
   ok,
+  STORE_BLOB_DIR,
   STORE_KEY_FILE,
+  STORE_LOG_FILE,
   type AgentPlatform,
   type KeyringMode,
   type Logger,
@@ -58,6 +62,7 @@ export interface Keyring {
   getOrCreateMasterKey(): Result<Buffer>
   unlockWithPassphrase(passphrase: string): Result<Buffer>
   lock(): void
+  rekeyAfterCorruption(): Result<{ lostItems: number }>
 }
 
 const REKEY_HINT =
@@ -113,6 +118,23 @@ export function ensureDir0700(dir: string): void {
  * `TS2769: No overload matches this call. ... Type 'string' is not assignable to parameter of type
  * 'ArrayBufferView<ArrayBufferLike>'`.
  */
+/** Counts `\n` in a 64 KiB streaming loop, so a 512 MiB log is never read into memory. */
+function countLines(path: string): number {
+  if (!existsSync(path)) return 0
+  const fd = openSync(path, 'r')
+  try {
+    const buf = Buffer.allocUnsafe(65_536)
+    let lines = 0
+    let read = 0
+    while ((read = readSync(fd, buf, 0, buf.length, null)) > 0) {
+      for (let i = 0; i < read; i++) if (buf[i] === 0x0a) lines++
+    }
+    return lines
+  } finally {
+    closeSync(fd)
+  }
+}
+
 export function writeFile0600(filePath: string, bytes: string | Uint8Array): void {
   const buf = typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : bytes
   const fd = openSync(filePath, 'w', 0o600)
@@ -185,7 +207,18 @@ export function createKeyring(opts: KeyringOptions): Keyring {
         logger.error('keyring.unlock-failed', { ok: false })
         return err('E_KEYRING_UNAVAILABLE', `${STORE_KEY_FILE} has no wrapped key. ${REKEY_HINT}`)
       }
-      const key = Buffer.from(safeStorage.decryptString(Buffer.from(wrapped, 'base64')), 'base64')
+      let plain: string
+      try {
+        plain = safeStorage.decryptString(Buffer.from(wrapped, 'base64'))
+      } catch {
+        // macOS re-signing invalidates the Keychain ACL. Report it; never retry, never crash-loop.
+        logger.error('keyring.unlock-failed', { ok: false })
+        return err(
+          'E_KEYRING_UNAVAILABLE',
+          `${STORE_KEY_FILE} could not be unwrapped by the OS keyring. ${REKEY_HINT}`,
+        )
+      }
+      const key = Buffer.from(plain, 'base64')
       if (key.length !== MASTER_KEY_BYTES) {
         key.fill(0)
         logger.error('keyring.unlock-failed', { ok: false })
@@ -276,11 +309,28 @@ export function createKeyring(opts: KeyringOptions): Keyring {
     return ok(key)
   }
 
+  function rekeyAfterCorruption(): Result<{ lostItems: number }> {
+    lock()
+    const lostItems = countLines(join(dir, STORE_LOG_FILE))
+    rmSync(join(dir, STORE_LOG_FILE), { force: true })
+    rmSync(join(dir, STORE_BLOB_DIR), { recursive: true, force: true })
+    rmSync(keyPath, { force: true })
+    logger.warn('keyring.mode', { mode: 'locked', count: lostItems })
+
+    if (probeBackend(safeStorage, platform).strength === 'none') {
+      return ok({ lostItems }) // caller must now call unlockWithPassphrase() to set a new one
+    }
+    const created = getOrCreateMasterKey()
+    if (!created.ok) return created
+    return ok({ lostItems })
+  }
+
   return {
     getMode: () => mode,
     probeBackend: () => probeBackend(safeStorage, platform),
     getOrCreateMasterKey,
     unlockWithPassphrase,
     lock,
+    rekeyAfterCorruption,
   }
 }

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { STORE_KEY_FILE } from '@cairn/protocol'
+import { STORE_BLOB_DIR, STORE_KEY_FILE, STORE_LOG_FILE } from '@cairn/protocol'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createKeyring, ensureDir0700, writeFile0600 } from './keyring'
 import { createCapturingLogger, createFakeSafeStorage, type CapturingLogger } from './testing'
@@ -56,6 +56,34 @@ describe('getOrCreateMasterKey', () => {
     const bytes = readFileSync(join(dir, STORE_KEY_FILE))
     expect(bytes.includes(created.value)).toBe(false)
     expect(bytes.toString('utf8').includes(created.value.toString('base64'))).toBe(false)
+  })
+
+  it('refuses os-keyring mode when the backend is basic_text and stays locked', () => {
+    const keyring = createKeyring({
+      safeStorage: createFakeSafeStorage({ backend: 'basic_text' }),
+      platform: 'linux',
+      dir,
+      logger,
+    })
+    const result = keyring.getOrCreateMasterKey()
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('E_KEYRING_WEAK_BACKEND')
+    expect(result.message).toContain('hardcoded password')
+    expect(keyring.getMode()).toBe('locked')
+    expect(existsSync(join(dir, STORE_KEY_FILE))).toBe(false)
+    expect(logger.lines.some((l) => l.event === 'keyring.backend-refused')).toBe(true)
+  })
+
+  it('refuses when encryption is unavailable and never touches the encryption surface', () => {
+    const safeStorage = createFakeSafeStorage({ available: false, backend: 'gnome_libsecret' })
+    const keyring = createKeyring({ safeStorage, platform: 'linux', dir, logger })
+    const result = keyring.getOrCreateMasterKey()
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('E_KEYRING_UNAVAILABLE')
+    expect(keyring.getMode()).toBe('locked')
+    expect(safeStorage.calls).toEqual(['isEncryptionAvailable'])
   })
 
   it('reports E_KEYRING_LOCKED rather than overwriting a passphrase key.bin', () => {
@@ -124,33 +152,18 @@ describe('data directory and file permissions', () => {
     expect(statSync(nested).mode & 0o777).toBe(0o700)
   })
 
-it('refuses os-keyring mode when the backend is basic_text and stays locked', () => {
-  const keyring = createKeyring({
-    safeStorage: createFakeSafeStorage({ backend: 'basic_text' }),
-    platform: 'linux',
-    dir,
-    logger,
-  })
-  const result = keyring.getOrCreateMasterKey()
-  expect(result.ok).toBe(false)
-  if (result.ok) return
-  expect(result.code).toBe('E_KEYRING_WEAK_BACKEND')
-  expect(result.message).toContain('hardcoded password')
-  expect(keyring.getMode()).toBe('locked')
-  expect(existsSync(join(dir, STORE_KEY_FILE))).toBe(false)
-  expect(logger.lines.some((l) => l.event === 'keyring.backend-refused')).toBe(true)
-})
+  it('writes key.bin 0600, and re-tightens a pre-existing wide-open key.bin', () => {
+    const keyPath = join(dir, STORE_KEY_FILE)
+    writeFileSync(keyPath, 'not a key file', { mode: 0o644 })
+    expect(statSync(keyPath).mode & 0o777).toBe(0o644)
 
-it('refuses when encryption is unavailable and never touches the encryption surface', () => {
-  const safeStorage = createFakeSafeStorage({ available: false, backend: 'gnome_libsecret' })
-  const keyring = createKeyring({ safeStorage, platform: 'linux', dir, logger })
-  const result = keyring.getOrCreateMasterKey()
-  expect(result.ok).toBe(false)
-  if (result.ok) return
-  expect(result.code).toBe('E_KEYRING_UNAVAILABLE')
-  expect(keyring.getMode()).toBe('locked')
-  expect(safeStorage.calls).toEqual(['isEncryptionAvailable'])
-})
+    const keyring = createKeyring({ safeStorage: createFakeSafeStorage(), platform: 'macos', dir, logger })
+    // A malformed key.bin is a re-key path, not an overwrite.
+    const refused = keyring.getOrCreateMasterKey()
+    expect(refused.ok).toBe(false)
+    expect(keyring.rekeyAfterCorruption().ok).toBe(true)
+    expect(statSync(keyPath).mode & 0o777).toBe(0o600)
+  })
 })
 
 describe('unlockWithPassphrase', () => {
@@ -223,5 +236,72 @@ describe('unlockWithPassphrase', () => {
     if (result.ok) return
     expect(result.code).toBe('E_KEYRING_UNAVAILABLE')
     expect(readFileSync(join(dir, STORE_KEY_FILE)).equals(before)).toBe(true)
+  })
+})
+
+describe('rekeyAfterCorruption', () => {
+  it('returns E_KEYRING_UNAVAILABLE on a decrypt failure and does not crash-loop', () => {
+    const good = createFakeSafeStorage()
+    expect(createKeyring({ safeStorage: good, platform: 'macos', dir, logger }).getOrCreateMasterKey().ok).toBe(true)
+    const before = readFileSync(join(dir, STORE_KEY_FILE))
+
+    const broken = createFakeSafeStorage({ failDecrypt: true })
+    const keyring = createKeyring({ safeStorage: broken, platform: 'macos', dir, logger })
+    for (const attempt of [1, 2, 3]) {
+      const result = keyring.getOrCreateMasterKey()
+      expect(result.ok, `attempt ${attempt}`).toBe(false)
+      if (result.ok) return
+      expect(result.code).toBe('E_KEYRING_UNAVAILABLE')
+      expect(result.message).toContain('rekeyAfterCorruption()')
+      expect(keyring.getMode()).toBe('locked')
+    }
+    expect(readFileSync(join(dir, STORE_KEY_FILE)).equals(before)).toBe(true)
+  })
+
+  it('reports the lost line count, clears the store and installs a fresh key', () => {
+    const good = createFakeSafeStorage()
+    const original = createKeyring({ safeStorage: good, platform: 'macos', dir, logger }).getOrCreateMasterKey()
+    expect(original.ok).toBe(true)
+    if (!original.ok) return
+    writeFileSync(join(dir, STORE_LOG_FILE), 'line1\nline2\nline3\n', { mode: 0o600 })
+    mkdirSync(join(dir, STORE_BLOB_DIR), { mode: 0o700 })
+    writeFileSync(join(dir, STORE_BLOB_DIR, 'sha256-x'), 'sealed', { mode: 0o600 })
+
+    const keyring = createKeyring({ safeStorage: good, platform: 'macos', dir, logger })
+    const result = keyring.rekeyAfterCorruption()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.lostItems).toBe(3)
+    expect(existsSync(join(dir, STORE_LOG_FILE))).toBe(false)
+    expect(existsSync(join(dir, STORE_BLOB_DIR))).toBe(false)
+    expect(keyring.getMode()).toBe('os-keyring')
+
+    const fresh = keyring.getOrCreateMasterKey()
+    expect(fresh.ok).toBe(true)
+    if (!fresh.ok) return
+    expect(fresh.value.equals(original.value)).toBe(false)
+  })
+
+  it('reports lostItems 0 when there is no log yet', () => {
+    const keyring = createKeyring({ safeStorage: createFakeSafeStorage(), platform: 'macos', dir, logger })
+    const result = keyring.rekeyAfterCorruption()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.lostItems).toBe(0)
+  })
+
+  it('leaves the keyring locked for a passphrase re-key when no backend is usable', () => {
+    const safeStorage = createFakeSafeStorage({ backend: 'basic_text' })
+    const keyring = createKeyring({ safeStorage, platform: 'linux', dir, logger })
+    expect(keyring.unlockWithPassphrase(PASSPHRASE).ok).toBe(true)
+    writeFileSync(join(dir, STORE_LOG_FILE), 'a\nb\n', { mode: 0o600 })
+
+    const result = keyring.rekeyAfterCorruption()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.lostItems).toBe(2)
+    expect(keyring.getMode()).toBe('locked')
+    expect(existsSync(join(dir, STORE_KEY_FILE))).toBe(false)
+    expect(keyring.unlockWithPassphrase('a brand new passphrase').ok).toBe(true)
   })
 })
