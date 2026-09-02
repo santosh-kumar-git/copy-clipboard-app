@@ -60,7 +60,16 @@ behaviour a palette wants (type into it without activating the app), and it is w
 for free rather than from the panel type. It is also a live warning: this window grabs the keyboard
 as soon as it is shown, so never leave a debug build of it open.
 
-`layer=1000` in every run confirms `setAlwaysOnTop(true, 'screen-saver')` takes effect.
+`layer=1000` in every run confirms `setAlwaysOnTop(true, 'screen-saver')` takes effect, and this was
+**also confirmed visually by the repo owner**: with the spike window up, switching to another app left
+the window still floating above it rather than being covered. Together with the key-event result above,
+that is the whole palette behaviour we need — visible over the app you were using, and typeable —
+without depending on the panel type for either.
+
+A second machine-side observation from the `POLICY=regular` run, worth recording so it is not
+misread later: `frontmost` after `focus()` came back as `com.tinyspeck.slackmacgap`. That was the
+owner Cmd-Tabbing to Slack during the observation window, **not** the Electron app taking focus. It
+does confirm the switcher was genuinely open at the time.
 
 **Consequences, per the decision written down before the spike ran:** the palette task may still pass
 `type:'panel'` (it costs nothing and Electron's typings accept `type?: string` unvalidated), but
@@ -89,8 +98,31 @@ trustedWithPrompt=skipped (pass --prompt to raise the TCC dialog)
 
 | run | dialog named | entry added to the Accessibility list | granted? |
 |---|---|---|---|
-| probe run directly from a shell | not run — needs a human to read a system dialog | none; `trustedBefore=false` and no entry exists | no |
-| probe spawned by an Electron parent | not run — needs a human to read a system dialog | none; nothing was prompted | no |
+| probe run directly from a shell (`parentBundle=none`) | **the parent apps — `Terminal` and `Visual Studio Code`** — never `ax-probe` | `Terminal` and `Visual Studio Code` | yes, then **revoked** |
+| probe spawned by an Electron parent | **not run on purpose** — it would create a second standing grant for no additional answer | none | no |
+
+**Answer: TCC attributes the request to the responsible parent process, not to the Swift helper.** The
+probe was launched directly, declared `parentBundle=none`, and the dialogs that appeared named
+`Terminal` and `Visual Studio Code` — the apps up the process tree — not the `ax-probe` binary that
+actually called `AXIsProcessTrustedWithOptions`. So the hope that a grant could attach to a stable
+Swift helper and survive Electron rebuilds is **wrong on this OS version**, exactly as spec §10
+cautioned. M2 must not be designed around helper-level attribution.
+
+Two further facts fell out of the run, both of which M2 depends on:
+
+- `AXIsProcessTrustedWithOptions` returned **`false` synchronously** while the grant was in fact being
+  made. The prompt is asynchronous and the call does not wait for the human. A later
+  `AXIsProcessTrusted()` returned `true`. So code must never treat the return value of the prompting
+  call as the answer — it must poll afterwards, which is precisely the 1 Hz / 60 s poll spec §6
+  specifies.
+- The grant landed on the **terminal**, which is a far broader privilege than granting it to the app:
+  Accessibility on `Terminal` is inherited by every process ever launched from it. That is a good
+  reason for M2 to prompt as the packaged Cairn app and never from a dev shell — and for
+  `npm run dev:signed` (M3) to exist, so the grant attaches to one stable signed identity.
+
+**Both grants were revoked immediately after the observation.** Nothing in M1 or M2 requires them:
+`trustedBefore=false` is the assumed and supported state, and `CGEventPost` failing silently when
+untrusted is why `deliver()` returns `{result:'copied-manual', reason:'no-permission'}`.
 
 **The attribution half is deliberately not run here.** It requires raising a real TCC dialog and
 reading which app name it names, and an agent must not click through a system security prompt on the
