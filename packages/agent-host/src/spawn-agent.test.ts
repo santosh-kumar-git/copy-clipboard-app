@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   AGENT_REQUEST_TIMEOUT_MS,
   CHUNK_PAYLOAD_BYTES,
@@ -359,4 +361,86 @@ it('replaces the child after 10 unparseable lines in a row', async () => {
     await agent.dispose()
   }
 })
+
+it('writes the reassembled payload to NO file anywhere under the temp directory', async () => {
+  // The `node:os` temp-path helper is deliberately NOT imported here: its name is one of the
+  // substrings the local scan below bans across every .ts file in this package, test files
+  // included. Listing the tree needs only the env var, so use it.
+  const tempRoot = process.env['TMPDIR'] ?? '/tmp'
+  const { agent } = stub('chunked-image')
+  const changes: ClipboardChangedPayload[] = []
+  agent.on('clipboard.changed', (p) => changes.push(p))
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await waitFor(() => changes.length === 1, 'the reassembled clipboard.changed')
+  } finally {
+    await agent.dispose()
+  }
+  const payload = fillerBytes(200_000)
+  const head = payload.subarray(0, 48)
+  const middle = payload.subarray(100_000, 100_048)
+  // EVERY file, not just files created during this test: a leaked payload file written by an
+  // earlier test in this same file would otherwise hide inside a "before" snapshot. Other vitest
+  // workers churn this directory concurrently, which is fine — the assertion is about payload
+  // bytes, not about the file list being unchanged.
+  for (const f of listFiles(tempRoot)) {
+    let bytes: Buffer
+    try {
+      if (statSync(f).size > 8 * 1024 * 1024) continue
+      bytes = readFileSync(f)
+    } catch {
+      continue
+    }
+    expect(bytes.includes(head), `${f} contains the payload head`).toBe(false)
+    expect(bytes.includes(middle), `${f} contains payload bytes`).toBe(false)
+  }
 })
+
+it('has no temp-file or file-write identifier anywhere in the package source', () => {
+  // Every needle is assembled from two fragments so this file does not contain the identifiers it
+  // bans. That is not decoration: this scan covers every .ts file in the package *including*
+  // .test.ts files, so it must survive reading its own source. The repo-wide guard
+  // security/no-plaintext-on-disk.security.test.ts exempts *.test.ts paths, which makes this local
+  // scan the stricter of the two on purpose — the bytes land in this package first.
+  const banned = [
+    'mkd' + 'temp',
+    'tmp' + 'dir',
+    'write' + 'File',
+    'append' + 'File',
+    'create' + 'WriteStream',
+    'sp' + 'ool',
+  ]
+  const srcDir = new URL('.', import.meta.url).pathname
+  const offenders: string[] = []
+  for (const name of readdirSync(srcDir)) {
+    if (!name.endsWith('.ts')) continue
+    const text = readFileSync(join(srcDir, name), 'utf8')
+    for (const b of banned) if (text.includes(b)) offenders.push(`${name}: ${b}`)
+  }
+  expect(offenders, 'banned identifiers in packages/agent-host/src').toEqual([])
+})
+})
+
+/** Every file under `root`, two directory levels deep, skipping anything unreadable. */
+function listFiles(root: string, depth = 2): string[] {
+  const out: string[] = []
+  const walk = (dir: string, d: number): void => {
+    let entries: { name: string; isDirectory(): boolean }[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) {
+        if (d > 0) walk(p, d - 1)
+      } else {
+        out.push(p)
+      }
+    }
+  }
+  walk(root, depth)
+  return out.sort()
+}
