@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/keyring",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "master key + honest backend reporting",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/keyring",
+    "test:security": "vitest run --root ../.. --project security packages/keyring"
+  },
+  "dependencies": { "@cairn/protocol": "0.1.0" }
+}

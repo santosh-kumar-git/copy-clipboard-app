@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "zod contracts + codegen",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/protocol",
+    "test:security": "vitest run --root ../.. --project security packages/protocol"
+  },
+  "dependencies": { "zod": "4.5.4" }
+}

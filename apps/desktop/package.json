@@ -1,0 +1,18 @@
+{
+  "name": "@cairn/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron composition root, hardened palette window and typed IPC",
+  "main": "out/main/index.js",
+  "dependencies": {
+    "@cairn/agent-host": "0.1.0",
+    "@cairn/capture": "0.1.0",
+    "@cairn/history": "0.1.0",
+    "@cairn/hotkey": "0.1.0",
+    "@cairn/keyring": "0.1.0",
+    "@cairn/privacy": "0.1.0",
+    "@cairn/protocol": "0.1.0",
+    "@cairn/search": "0.1.0",
+    "@cairn/store": "0.1.0"
+  }
+}

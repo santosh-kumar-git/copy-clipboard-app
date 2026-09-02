@@ -1,0 +1,41 @@
+{
+  "name": "cairn",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24.20.0" },
+  "workspaces": ["packages/*", "apps/desktop"],
+  "scripts": {
+    "bootstrap": "node node_modules/electron/install.js",
+    "guard:no-rebuild": "node scripts/guard-no-electron-rebuild.mjs",
+    "scan:transcripts": "node scripts/scan-transcripts.mjs",
+    "gen:agent-types": "node tools/gen-agent-types.ts",
+    "agent:macos": "make agent",
+    "typecheck": "tsc -p tsconfig.json && svelte-check --tsconfig apps/desktop/renderer/tsconfig.json --threshold error",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:renderer": "vitest run --project renderer",
+    "test:security": "vitest run --project security",
+    "test:watch": "vitest",
+    "build": "npm run guard:no-rebuild && npm run agent:macos && electron-vite build",
+    "dev": "npm run agent:macos && electron-vite dev",
+    "verify": "npm run guard:no-rebuild && npm run typecheck && npm run test && npm run scan:transcripts"
+  },
+  "devDependencies": {
+    "@leeoniya/ufuzzy": "1.0.19",
+    "@sveltejs/vite-plugin-svelte": "6.2.4",
+    "@types/node": "24.9.2",
+    "@vitest/coverage-v8": "4.1.11",
+    "electron": "44.1.1",
+    "electron-vite": "5.0.0",
+    "jsdom": "30.0.1",
+    "sharp": "0.35.4",
+    "svelte": "5.57.0",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.11",
+    "zod": "4.5.4"
+  }
+}

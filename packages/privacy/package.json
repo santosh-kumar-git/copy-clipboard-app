@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/privacy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "record?/sync? policy + detectors",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/privacy",
+    "test:security": "vitest run --root ../.. --project security packages/privacy"
+  },
+  "dependencies": { "@cairn/protocol": "0.1.0" }
+}

@@ -72,7 +72,7 @@ not needed.
 nvm use
 npm ci
 npm test          # everything runs against fakes; no OS permissions needed
-npm run doctor    # prints platform capabilities and exactly why anything is unavailable
+# `npm run doctor` (platform capabilities and why anything is unavailable) lands in Milestone 2.
 ```
 
 ## Distribution
