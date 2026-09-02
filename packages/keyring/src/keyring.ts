@@ -132,6 +132,19 @@ export function createKeyring(opts: KeyringOptions): Keyring {
 
   function getOrCreateMasterKey(): Result<Buffer> {
     if (masterKey !== null) return ok(masterKey)
+    const report = probeBackend(safeStorage, platform)
+    if (report.strength === 'none') {
+      logger.warn('keyring.backend-refused', { mode: 'locked' })
+      return report.backend === 'basic_text'
+        ? err(
+            'E_KEYRING_WEAK_BACKEND',
+            'refusing os-keyring mode: safeStorage selected the basic_text backend, which encrypts with a hardcoded password. Set a passphrase instead.',
+          )
+        : err(
+            'E_KEYRING_UNAVAILABLE',
+            'safeStorage reports encryption is unavailable. Set a passphrase instead.',
+          )
+    }
 
     ensureDir0700(dir)
     const read = readKeyFile()

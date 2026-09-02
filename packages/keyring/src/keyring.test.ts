@@ -108,4 +108,32 @@ describe('data directory and file permissions', () => {
     expect(keyring.getOrCreateMasterKey().ok).toBe(true)
     expect(statSync(nested).mode & 0o777).toBe(0o700)
   })
+
+it('refuses os-keyring mode when the backend is basic_text and stays locked', () => {
+  const keyring = createKeyring({
+    safeStorage: createFakeSafeStorage({ backend: 'basic_text' }),
+    platform: 'linux',
+    dir,
+    logger,
+  })
+  const result = keyring.getOrCreateMasterKey()
+  expect(result.ok).toBe(false)
+  if (result.ok) return
+  expect(result.code).toBe('E_KEYRING_WEAK_BACKEND')
+  expect(result.message).toContain('hardcoded password')
+  expect(keyring.getMode()).toBe('locked')
+  expect(existsSync(join(dir, STORE_KEY_FILE))).toBe(false)
+  expect(logger.lines.some((l) => l.event === 'keyring.backend-refused')).toBe(true)
+})
+
+it('refuses when encryption is unavailable and never touches the encryption surface', () => {
+  const safeStorage = createFakeSafeStorage({ available: false, backend: 'gnome_libsecret' })
+  const keyring = createKeyring({ safeStorage, platform: 'linux', dir, logger })
+  const result = keyring.getOrCreateMasterKey()
+  expect(result.ok).toBe(false)
+  if (result.ok) return
+  expect(result.code).toBe('E_KEYRING_UNAVAILABLE')
+  expect(keyring.getMode()).toBe('locked')
+  expect(safeStorage.calls).toEqual(['isEncryptionAvailable'])
+})
 })
