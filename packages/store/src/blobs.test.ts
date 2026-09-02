@@ -4,7 +4,8 @@ import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BLOB_HKDF_INFO, contentHash, type BlobId } from '@cairn/protocol'
 import { createBlobStore } from './blobs'
-import { randomTestKey, silentLogger, tempStoreDir } from './testing'
+import { fixedClock, itemFixture, randomTestKey, silentLogger, tempStoreDir, testItemId } from './testing'
+import { openStore } from './log-store'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -168,5 +169,78 @@ describe('createBlobStore', () => {
     const fresh = createBlobStore({ blobDir, key, logger: silentLogger })
     const reread = fresh.get(put.value)
     expect(reread.ok && reread.value.toString('utf8')).toBe('before close')
+  })
+})
+
+describe('blob-before-event ordering (spec §4)', () => {
+  function freshStore() {
+    const { dir, cleanup } = tempStoreDir()
+    cleanups.push(cleanup)
+    const key = randomTestKey()
+    const opened = openStore({ dir, key, clock: fixedClock(), logger: silentLogger })
+    if (!opened.ok) throw new Error(`${opened.code} ${opened.message}`)
+    return { dir, key, store: opened.value }
+  }
+
+  it('refuses an ITEM_ADDED whose rep blob is not on disk, and writes nothing', () => {
+    const { store } = freshStore()
+    const before = store.stat()
+    const appended = store.appendEvent({
+      kind: 'ITEM_ADDED',
+      item: itemFixture(testItemId(1), MISSING, 'never-stored'),
+    })
+    expect(appended.ok).toBe(false)
+    if (appended.ok) throw new Error('unreachable')
+    expect(appended.code).toBe('E_BLOB_MISSING')
+    expect(store.stat()).toEqual(before) // not one line was appended
+  })
+
+  it('refuses an ITEM_ADDED whose THUMBNAIL blob is not on disk', () => {
+    const { store } = freshStore()
+    const blob = store.putBlob(Buffer.from('real body', 'utf8'))
+    if (!blob.ok) throw new Error('unreachable')
+    const item = { ...itemFixture(testItemId(1), blob.value, 'real body'), thumbnailBlobId: MISSING }
+    const appended = store.appendEvent({ kind: 'ITEM_ADDED', item })
+    expect(appended.ok).toBe(false)
+    if (appended.ok) throw new Error('unreachable')
+    expect(appended.code).toBe('E_BLOB_MISSING')
+  })
+
+  it('a crash between putBlob and appendEvent leaves a readable ORPHAN, GCd at compaction', async () => {
+    const { dir, key, store } = freshStore()
+    const orphan = store.putBlob(Buffer.from('orphaned body', 'utf8'))
+    if (!orphan.ok) throw new Error('unreachable')
+    store.close() // the crash: the referencing event never gets appended
+
+    const reopened = openStore({ dir, key, clock: fixedClock(), logger: silentLogger })
+    if (!reopened.ok) throw new Error('unreachable')
+    expect(reopened.value.getBlob(orphan.value).ok).toBe(true)
+    const referenced = new Set<string>()
+    for await (const record of reopened.value.readAll()) {
+      if (record.ok && record.value.kind === 'ITEM_ADDED') {
+        for (const ref of record.value.item.repRefs) referenced.add(ref.blobId)
+      }
+    }
+    expect(referenced.has(orphan.value)).toBe(false)
+    expect(reopened.value.compact([]).ok && reopened.value.stat()).toEqual({
+      ok: true,
+      value: expect.objectContaining({ blobCount: 0 }),
+    })
+    expect(reopened.value.getBlob(orphan.value).ok).toBe(false)
+  })
+
+  it('every blob referenced by a committed record is readable — the invariant that matters', async () => {
+    const { store } = freshStore()
+    for (let i = 0; i < 3; i++) {
+      const text = `body-${i}`
+      const blob = store.putBlob(Buffer.from(text, 'utf8'))
+      if (!blob.ok) throw new Error('unreachable')
+      store.appendEvent({ kind: 'ITEM_ADDED', item: itemFixture(testItemId(i + 1), blob.value, text) })
+    }
+    for await (const record of store.readAll()) {
+      if (record.ok && record.value.kind === 'ITEM_ADDED') {
+        for (const ref of record.value.item.repRefs) expect(store.getBlob(ref.blobId).ok).toBe(true)
+      }
+    }
   })
 })
