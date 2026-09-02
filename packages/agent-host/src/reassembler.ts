@@ -4,10 +4,12 @@ import {
   MAX_REP_BYTES,
   REP_STREAM_TIMEOUT_MS,
   type Cancel,
+  type ClipboardChangedPayload,
   type Clock,
   type ContentHash,
   type ErrorCode,
   type Logger,
+  type PasteboardHint,
   type Rep,
   type ResolvedRep,
 } from '@cairn/protocol'
@@ -185,6 +187,149 @@ export function createReassembler(opts: {
       let n = 0
       for (const s of streams.values()) n += s.receivedBytes
       return n
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The change assembler: turns ONE `clipboard.changed` wire event into ONE ClipboardChangedPayload,
+// holding it until every chunked representation it declared has completed or been discarded.
+// ---------------------------------------------------------------------------------------------
+
+export interface ChangedWire {
+  readonly changeCount: number
+  readonly hints: readonly PasteboardHint[]
+  readonly reps: readonly Rep[]
+  readonly frontmostBundleId: string | null
+  readonly frontmostName: string | null
+  readonly attributionConfidence: 'heuristic' | 'unknown'
+}
+
+export interface ChangeAssembler {
+  handleChanged(w: ChangedWire): void
+  handleChunk(c: RepChunkIn): void
+  abortAll(code: ErrorCode): void
+  readonly openStreams: number
+  readonly pendingChanges: number
+}
+
+interface Slot {
+  readonly mime: string
+  resolved: ResolvedRep | null
+  dropped: ErrorCode | null
+}
+
+interface PendingChange {
+  readonly slots: Slot[]
+  readonly wire: ChangedWire
+  outstanding: number
+}
+
+export function createChangeAssembler(opts: {
+  clock: Clock
+  logger: Logger
+  emit: (payload: ClipboardChangedPayload) => void
+}): ChangeAssembler {
+  const { logger, emit } = opts
+  /** repId -> which pending change and which slot it fills. */
+  const owner = new Map<string, { change: PendingChange; slot: number }>()
+  let pending: PendingChange[] = []
+
+  const finish = (p: PendingChange): void => {
+    pending = pending.filter((q) => q !== p)
+    const reps: ResolvedRep[] = []
+    const droppedReps: { mime: string; code: ErrorCode }[] = []
+    for (const s of p.slots) {
+      if (s.resolved !== null) reps.push(s.resolved)
+      else if (s.dropped !== null) droppedReps.push({ mime: s.mime, code: s.dropped })
+    }
+    const w = p.wire
+    emit({
+      changeCount: w.changeCount,
+      changeToken: String(w.changeCount),
+      hints: w.hints,
+      reps,
+      sourceApp:
+        w.frontmostBundleId === null && w.frontmostName === null
+          ? null
+          : { bundleId: w.frontmostBundleId, name: w.frontmostName, confidence: w.attributionConfidence },
+      droppedReps,
+    })
+  }
+
+  const reassembler = createReassembler({
+    clock: opts.clock,
+    logger,
+    onComplete: (repId, rep) => {
+      const at = owner.get(repId)
+      if (at === undefined) return
+      owner.delete(repId)
+      at.change.slots[at.slot]!.resolved = rep
+      at.change.outstanding -= 1
+      if (at.change.outstanding === 0) finish(at.change)
+    },
+    onAbort: ({ repId, code }) => {
+      const at = owner.get(repId)
+      if (at === undefined) return
+      owner.delete(repId)
+      at.change.slots[at.slot]!.dropped = code
+      at.change.outstanding -= 1
+      if (at.change.outstanding === 0) finish(at.change)
+    },
+  })
+
+  return {
+    handleChanged(w): void {
+      const slots: Slot[] = w.reps.map((r) => ({ mime: r.mime, resolved: null, dropped: null }))
+      const p: PendingChange = { slots, wire: w, outstanding: 0 }
+      const chunked: { rep: Rep & { repId: string }; slot: number }[] = []
+      w.reps.forEach((r, i) => {
+        if (r.inline !== undefined) {
+          const bytes = Buffer.from(r.inline, 'base64')
+          const hash = contentHash(bytes)
+          if (bytes.length !== r.byteLength) {
+            slots[i]!.dropped = 'E_REP_SHORT'
+            logger.warn('rep.stream-aborted', { code: 'E_REP_SHORT', mime: r.mime })
+          } else if (hash !== r.sha256) {
+            slots[i]!.dropped = 'E_REP_HASH_MISMATCH'
+            logger.warn('rep.stream-aborted', { code: 'E_REP_HASH_MISMATCH', mime: r.mime })
+          } else {
+            slots[i]!.resolved = { mime: r.mime, uti: r.uti, bytes, byteLength: bytes.length, sha256: hash }
+            logger.debug('rep.inline-received', { mime: r.mime, byteLength: bytes.length })
+          }
+        } else if (r.repId !== undefined) {
+          chunked.push({ rep: r as Rep & { repId: string }, slot: i })
+          p.outstanding += 1
+        }
+      })
+      if (p.outstanding === 0) {
+        finish(p)
+        return
+      }
+      pending.push(p)
+      for (const c of chunked) {
+        owner.set(c.rep.repId, { change: p, slot: c.slot })
+        reassembler.declare(c.rep)
+      }
+    },
+
+    handleChunk(c): void {
+      reassembler.chunk(c)
+    },
+
+    abortAll(code): void {
+      // Aborting every stream settles every pending change through onAbort, so a consumer that was
+      // waiting on a chunked rep gets a payload with `droppedReps` rather than nothing at all.
+      reassembler.abortAll(code)
+      pending = []
+      owner.clear()
+    },
+
+    get openStreams(): number {
+      return reassembler.openStreams
+    },
+    get pendingChanges(): number {
+      return pending.length
     },
   }
 }

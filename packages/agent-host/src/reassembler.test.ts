@@ -4,6 +4,7 @@ import {
   createTestClock,
   MAX_REP_BYTES,
   REP_STREAM_TIMEOUT_MS,
+  type ClipboardChangedPayload,
   type LogEvent,
   type LogFields,
   type Logger,
@@ -11,7 +12,7 @@ import {
   type ResolvedRep,
 } from '@cairn/protocol'
 import { describe, expect, it } from 'vitest'
-import { createReassembler, type RepAbort } from './reassembler'
+import { createChangeAssembler, createReassembler, type RepAbort } from './reassembler'
 
 interface RecordedLog { level: string; event: LogEvent; fields: LogFields }
 
@@ -254,5 +255,117 @@ it('reports E_REP_AFTER_FINAL for a chunk that arrives after the final one', () 
   expect(lines.filter((l) => l.event === 'rep.stream-aborted').map((l) => l.fields.code)).toEqual([
     'E_REP_AFTER_FINAL',
   ])
+})
+
+function changedWire(reps: Rep[], changeCount = 364) {
+  return {
+    changeCount,
+    hints: [] as const,
+    reps,
+    frontmostBundleId: 'com.apple.TextEdit',
+    frontmostName: 'TextEdit',
+    attributionConfidence: 'heuristic' as const,
+  }
+}
+
+function inlineRep(text: string, mime = 'text/plain'): Rep {
+  const bytes = Buffer.from(text, 'utf8')
+  return {
+    mime,
+    uti: 'public.utf8-plain-text',
+    byteLength: bytes.length,
+    sha256: contentHash(bytes),
+    inline: bytes.toString('base64'),
+  } as Rep
+}
+
+describe('createChangeAssembler', () => {
+  it('emits immediately when every rep is inline', () => {
+    const clock = createTestClock()
+    const { logger } = recordingLogger()
+    const emitted: ClipboardChangedPayload[] = []
+    const a = createChangeAssembler({ clock, logger, emit: (p) => emitted.push(p) })
+    a.handleChanged(changedWire([inlineRep('hello world')]))
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]!.changeToken).toBe('364')
+    expect(Buffer.from(emitted[0]!.reps[0]!.bytes).toString('utf8')).toBe('hello world')
+    expect(emitted[0]!.droppedReps).toEqual([])
+    expect(emitted[0]!.sourceApp).toEqual({
+      bundleId: 'com.apple.TextEdit',
+      name: 'TextEdit',
+      confidence: 'heuristic',
+    })
+  })
+
+  it('holds the payload until a chunked rep completes, then emits both reps in wire order', () => {
+    const clock = createTestClock()
+    const { logger } = recordingLogger()
+    const emitted: ClipboardChangedPayload[] = []
+    const a = createChangeAssembler({ clock, logger, emit: (p) => emitted.push(p) })
+    const image = fillerBytes(200_000)
+    a.handleChanged(changedWire([inlineRep('hello world'), wireRep(image, 'r1')]))
+    expect(emitted).toHaveLength(0)
+    expect(a.pendingChanges).toBe(1)
+    const parts = chunksOf(image)
+    parts.forEach((b64, seq) =>
+      a.handleChunk({ repId: 'r1', seq, final: seq === parts.length - 1, b64 }),
+    )
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]!.reps.map((r) => r.mime)).toEqual(['text/plain', 'image/tiff'])
+    expect(Buffer.from(emitted[0]!.reps[1]!.bytes).equals(image)).toBe(true)
+    expect(a.pendingChanges).toBe(0)
+    expect(a.openStreams).toBe(0)
+  })
+
+  it('emits the surviving reps with droppedReps when a chunked rep fails its hash', () => {
+    const clock = createTestClock()
+    const { logger } = recordingLogger()
+    const emitted: ClipboardChangedPayload[] = []
+    const a = createChangeAssembler({ clock, logger, emit: (p) => emitted.push(p) })
+    const image = fillerBytes(200_000)
+    const lying = { ...wireRep(image, 'r1'), sha256: contentHash(Buffer.from('nope')) } as Rep
+    a.handleChanged(changedWire([inlineRep('hello world'), lying]))
+    const parts = chunksOf(image)
+    parts.forEach((b64, seq) =>
+      a.handleChunk({ repId: 'r1', seq, final: seq === parts.length - 1, b64 }),
+    )
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]!.reps.map((r) => r.mime)).toEqual(['text/plain'])
+    expect(emitted[0]!.droppedReps).toEqual([{ mime: 'image/tiff', code: 'E_REP_HASH_MISMATCH' }])
+  })
+
+  it('keeps two interleaved chunked streams in separate clipboard ticks apart', () => {
+    const clock = createTestClock()
+    const { logger } = recordingLogger()
+    const emitted: ClipboardChangedPayload[] = []
+    const a = createChangeAssembler({ clock, logger, emit: (p) => emitted.push(p) })
+    const one = fillerBytes(70_000)
+    const two = Buffer.from(fillerBytes(70_000).reverse())
+    a.handleChanged(changedWire([wireRep(one, 'rA', 'image/png')], 401))
+    a.handleChanged(changedWire([wireRep(two, 'rB', 'image/tiff')], 402))
+    const pa = chunksOf(one)
+    const pb = chunksOf(two)
+    a.handleChunk({ repId: 'rB', seq: 0, final: false, b64: pb[0]! })
+    a.handleChunk({ repId: 'rA', seq: 0, final: false, b64: pa[0]! })
+    a.handleChunk({ repId: 'rA', seq: 1, final: false, b64: pa[1]! })
+    a.handleChunk({ repId: 'rB', seq: 1, final: false, b64: pb[1]! })
+    a.handleChunk({ repId: 'rB', seq: 2, final: true, b64: pb[2]! })
+    a.handleChunk({ repId: 'rA', seq: 2, final: true, b64: pa[2]! })
+    // rB finished first, so it is emitted first: each tick is independent.
+    expect(emitted.map((e) => e.changeCount)).toEqual([402, 401])
+    expect(Buffer.from(emitted[0]!.reps[0]!.bytes).equals(two)).toBe(true)
+    expect(Buffer.from(emitted[1]!.reps[0]!.bytes).equals(one)).toBe(true)
+  })
+
+  it('drops an inline rep whose declared hash does not match its bytes', () => {
+    const clock = createTestClock()
+    const { logger } = recordingLogger()
+    const emitted: ClipboardChangedPayload[] = []
+    const a = createChangeAssembler({ clock, logger, emit: (p) => emitted.push(p) })
+    const bad = { ...inlineRep('hello world'), sha256: contentHash(Buffer.from('other')) } as Rep
+    a.handleChanged(changedWire([bad]))
+    expect(emitted[0]!.reps).toEqual([])
+    expect(emitted[0]!.droppedReps).toEqual([{ mime: 'text/plain', code: 'E_REP_HASH_MISMATCH' }])
+  })
 })
 })
