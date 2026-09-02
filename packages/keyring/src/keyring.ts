@@ -57,6 +57,7 @@ export interface Keyring {
   probeBackend(): BackendReport
   getOrCreateMasterKey(): Result<Buffer>
   unlockWithPassphrase(passphrase: string): Result<Buffer>
+  lock(): void
 }
 
 const REKEY_HINT =
@@ -136,6 +137,15 @@ export function createKeyring(opts: KeyringOptions): Keyring {
     if (!existsSync(keyPath)) return { state: 'absent' }
     const file = parseKeyFile(readFileSync(keyPath, 'utf8'))
     return file === null ? { state: 'malformed' } : { state: 'ok', file }
+  }
+
+  function lock(): void {
+    if (masterKey !== null) {
+      masterKey.fill(0)
+      masterKey = null
+      logger.info('keyring.zeroed', { mode: 'locked' })
+    }
+    mode = 'locked'
   }
 
   function getOrCreateMasterKey(): Result<Buffer> {
@@ -271,5 +281,6 @@ export function createKeyring(opts: KeyringOptions): Keyring {
     probeBackend: () => probeBackend(safeStorage, platform),
     getOrCreateMasterKey,
     unlockWithPassphrase,
+    lock,
   }
 }
