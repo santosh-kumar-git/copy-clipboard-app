@@ -8,6 +8,9 @@ on:
 jobs:
   verify:
     runs-on: macos-15
+    # The whole job takes a couple of minutes. Without this, GitHub's default is SIX HOURS, so the
+    # first genuinely stuck run burns an afternoon of macOS runner minutes before anyone sees it.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,6 +22,13 @@ jobs:
         run: npm run guard:no-rebuild
       - name: Fetch the Electron binary (the one audited install step)
         run: npm run bootstrap
+      - name: Build the macOS agent
+        # Its own step for two reasons. It is the first swiftc invocation on a fresh runner, which
+        # builds the AppKit and Carbon modules from scratch — minutes of work that, folded into
+        # `npm test`, appears as a test suite mysteriously stalled with no output. And it warms the
+        # module cache, so tools/agent-selftest.test.ts compiles quickly instead of paying that cost
+        # inside a blocking execFileSync.
+        run: npm run agent:macos
       - name: Typecheck
         run: npm run typecheck
       - name: Tests

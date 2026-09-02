@@ -218,6 +218,32 @@ describe('start', () => {
     expect(chooseHotkey).not.toHaveBeenCalled()
     expect(h.saved).toEqual([])
   })
+
+  // Regression. index.ts creates the palette window and loads the renderer BEFORE start() runs, and
+  // the renderer's first act is history.list. IPC used to be registered at the END of start(), so
+  // that call raced the agent, capture, and — on first run — a modal dialog that waits on a human.
+  // It lost: "No handler registered for 'cairn:history.list'", and the palette opened empty.
+  // The dialog is the worst case, so it is what this asserts: by the time anything can block
+  // startup, every channel the renderer can call must already be answerable.
+  it('registers every IPC channel before startup can block on the first-run dialog', async () => {
+    let channelsWhenDialogOpened: string[] = []
+    let agentStartedFirst = false
+    const h = build({
+      firstRunDone: false,
+      chooseHotkey: async (candidates) => {
+        channelsWhenDialogOpened = [...h.registered.keys()]
+        agentStartedFirst = h.captureCalls.includes('start')
+        return candidates[0]!
+      },
+    })
+    await h.app.start()
+
+    expect(channelsWhenDialogOpened).toContain('cairn:history.list')
+    expect(channelsWhenDialogOpened).toHaveLength(8)
+    // Sanity: the dialog really does open after the slow startup work, so the race was real and
+    // this test would have caught it rather than passing for the wrong reason.
+    expect(agentStartedFirst).toBe(true)
+  })
 })
 
 describe('the hotkey → palette path', () => {

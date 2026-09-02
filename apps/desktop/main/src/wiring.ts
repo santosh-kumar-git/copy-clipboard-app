@@ -227,7 +227,28 @@ export function composeApp(deps: ComposeDeps): CairnApp {
 
   return {
     async start() {
-      // 1. The agent first: nothing else in M1 works without it.
+      // 0. IPC FIRST. This used to be step 5, reasoned as "IPC last, so no handler can be called
+      //    before its dependencies exist" — which had the race backwards. The palette window is
+      //    created and its renderer is loaded by index.ts BEFORE start() is ever called, and the
+      //    renderer's first act is history.list. Registering handlers down at step 5 meant that
+      //    call raced an `await agent.start()`, an `await capture.start()` and, on first run, a
+      //    MODAL DIALOG. It lost: "No handler registered for 'cairn:history.list'", and the palette
+      //    opened empty.
+      //    Registering here is safe because every dependency below is already constructed: history
+      //    is loaded before the window exists, and `palette` is the window itself. The one handler
+      //    that genuinely needs a started agent is recall.copy, which is only reachable by clicking
+      //    a row in a palette that cannot be shown until the hotkey binds at step 4.
+      unregisterIpc = registerIpcHandlers({
+        ipcMain,
+        history,
+        preview: { preview: previewText },
+        recall: { copy: recallCopy },
+        palette: { hide: () => palette.hide(), isVisible: () => palette.isVisible() },
+        security: { status: securityStatus },
+        logger,
+      })
+
+      // 1. The agent: nothing else in M1 works without it.
       await agent.start()
       await agent.request('watch.start', { intervalMs: WATCH_INTERVAL_MS })
 
@@ -274,16 +295,7 @@ export function composeApp(deps: ComposeDeps): CairnApp {
         sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt: clock.now() }, logger)
       })
 
-      // 5. IPC last, so no handler can be called before its dependencies exist.
-      unregisterIpc = registerIpcHandlers({
-        ipcMain,
-        history,
-        preview: { preview: previewText },
-        recall: { copy: recallCopy },
-        palette: { hide: () => palette.hide(), isVisible: () => palette.isVisible() },
-        security: { status: securityStatus },
-        logger,
-      })
+      // 5. (IPC used to be registered here. See step 0 for why it cannot be.)
 
       // 6. Preview-cache hygiene (spec §11 control 6). Electron maps 'lock-screen' /
       //    'unlock-screen' to the macOS distributed notifications com.apple.screenIsLocked /

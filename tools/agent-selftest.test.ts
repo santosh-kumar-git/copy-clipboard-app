@@ -33,6 +33,11 @@ describe.runIf(process.platform === 'darwin')('macOS agent Swift self-test', () 
       .map((f) => join(SOURCES_DIR, f))
     expect(sources.length).toBeGreaterThan(0)
 
+    // Both calls carry an explicit `timeout`. execFileSync BLOCKS the worker thread, so vitest's
+    // own test timeout cannot interrupt it — without this, a swiftc that never returns is
+    // indistinguishable from a hung CI job, with no output to say which test it died in. The
+    // budget is deliberately generous: a cold runner builds the AppKit and Carbon modules from
+    // scratch, which is minutes of work the local module cache normally hides (8s warm here).
     execFileSync(
       'swiftc',
       [
@@ -44,14 +49,14 @@ describe.runIf(process.platform === 'darwin')('macOS agent Swift self-test', () 
         ...sources,
         SELFTEST_SRC,
       ],
-      { stdio: 'pipe' },
+      { stdio: 'pipe', timeout: 240_000 },
     )
 
-    const output = execFileSync(SELFTEST_BIN, [], { encoding: 'utf8' })
+    const output = execFileSync(SELFTEST_BIN, [], { encoding: 'utf8', timeout: 60_000 })
     const failed = output.split('\n').filter((line) => line.startsWith('FAIL'))
     expect(failed, output).toEqual([])
     expect(output.trimEnd().endsWith('ALL PASS')).toBe(true)
-  }, 60_000)
+  }, 330_000)
 })
 
 /**
