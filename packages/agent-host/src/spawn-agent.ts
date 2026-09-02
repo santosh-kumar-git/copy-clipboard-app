@@ -11,6 +11,7 @@ import {
   type AgentParams,
   type AgentPlatform,
   type AgentResult,
+  type Cancel,
   type ClipboardAgent,
   type Clock,
   type ErrorCode,
@@ -87,7 +88,9 @@ export function createAgentCore(opts: {
   const splitter = createLineSplitter({
     onLine: (line) => core.handleLine(line),
     onOverflow: (droppedBytes) => {
+      // An unbounded line is a memory attack, so the child is replaced rather than trusted again.
       logger.error('agent.line-unparseable', { code: 'E_LINE_TOO_LONG', byteLength: droppedBytes })
+      onFatal('E_LINE_TOO_LONG')
     },
   })
 
@@ -101,6 +104,14 @@ export function createAgentCore(opts: {
       if (!parsed.ok) {
         consecutiveParseFailures += 1
         logger.warn('agent.line-unparseable', { code: parsed.code, count: consecutiveParseFailures })
+        if (parsed.code === 'E_WIRE_MAJOR') {
+          logger.error('agent.wire-major-mismatch', { code: 'E_WIRE_MAJOR' })
+          onFatal('E_WIRE_MAJOR')
+          return
+        }
+        if (consecutiveParseFailures >= MAX_CONSECUTIVE_PARSE_FAILURES) {
+          onFatal('E_PARSE')
+        }
         return
       }
       consecutiveParseFailures = 0
@@ -230,14 +241,17 @@ export interface SpawnAgentOptions {
 export function spawnAgent(opts: SpawnAgentOptions): ClipboardAgent {
   const { platform, binPath, clock, logger } = opts
   const args = [...(opts.args ?? [])]
+  const maxRestarts = opts.maxRestarts ?? DEFAULT_MAX_RESTARTS
 
   let child: ChildProcess | null = null
   let disposed = false
   let failed = false
+  let restartsUsed = 0
+  let cancelRestart: Cancel = () => {}
 
   const send = (line: string): Result<void> => {
     if (disposed) return err('E_AGENT_DISPOSED', 'agent has been disposed')
-    if (failed) return err('E_AGENT_EXIT', 'agent is not running')
+    if (failed) return err('E_AGENT_EXIT', `agent gave up after ${restartsUsed} restarts`)
     const stdin = child?.stdin
     if (child === null || stdin === null || stdin === undefined || !stdin.writable) {
       return err('E_AGENT_EXIT', 'agent is not running')
@@ -264,6 +278,27 @@ export function spawnAgent(opts: SpawnAgentOptions): ClipboardAgent {
     c.kill('SIGTERM')
   }
 
+  const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    child = null
+    logger.warn('agent.exited', { code: 'E_AGENT_EXIT', ok: code === 0, attempt: restartsUsed })
+    // Everything in flight is definitively over: no caller is left waiting on a dead process.
+    core.abortStreams('E_REP_TIMEOUT')
+    core.failAllPending('E_AGENT_EXIT', `agent exited (code ${String(code)}, signal ${String(signal)})`)
+    core.resetFraming()
+    if (disposed || failed) return
+    if (restartsUsed >= maxRestarts) {
+      failed = true
+      logger.error('agent.exited', { code: 'E_AGENT_EXIT', attempt: restartsUsed })
+      return
+    }
+    const delay = RESTART_BACKOFF_MS[Math.min(restartsUsed, RESTART_BACKOFF_MS.length - 1)]!
+    restartsUsed += 1
+    logger.info('agent.restart-scheduled', { attempt: restartsUsed, durationMs: delay })
+    cancelRestart = clock.setTimeout(() => {
+      void restart()
+    }, delay)
+  }
+
   const spawnChild = (): void => {
     logger.info('agent.spawning', { agent: platform })
     // `spawn` with an argv ARRAY and no shell option: spec §11 control 3 wants no shell anywhere in
@@ -280,15 +315,24 @@ export function spawnAgent(opts: SpawnAgentOptions): ClipboardAgent {
       logger.error('agent.exited', { code: 'E_AGENT_SPAWN' })
       core.failAllPending('E_AGENT_SPAWN', `could not spawn ${binPath}: ${e.message}`)
     })
-    c.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-      child = null
-      logger.warn('agent.exited', { code: 'E_AGENT_EXIT', ok: code === 0 })
-      // Everything in flight is definitively over: no caller waits on a dead process.
-      core.abortStreams('E_REP_TIMEOUT')
-      core.failAllPending('E_AGENT_EXIT', `agent exited (code ${String(code)}, signal ${String(signal)})`)
-      core.resetFraming()
-    })
+    c.on('exit', onExit)
     child = c
+  }
+
+  const restart = async (): Promise<void> => {
+    if (disposed || failed) return
+    spawnChild()
+    const r = await core.hello()
+    if (!r.ok) {
+      logger.error('agent.exited', { code: r.code })
+      return
+    }
+    logger.info('agent.started', { agent: platform })
+    // Re-arm what the app had asked for, or a crash would silently stop the clipboard watch.
+    const intervalMs = core.lastWatchIntervalMs
+    if (intervalMs !== null) await core.request('watch.start', { intervalMs })
+    const accelerator = core.lastAccelerator
+    if (accelerator !== null) await core.request('hotkey.register', { accelerator })
   }
 
   return {
@@ -318,6 +362,7 @@ export function spawnAgent(opts: SpawnAgentOptions): ClipboardAgent {
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
+      cancelRestart()
       core.abortStreams('E_REP_TIMEOUT')
       const c = child
       if (c !== null) {

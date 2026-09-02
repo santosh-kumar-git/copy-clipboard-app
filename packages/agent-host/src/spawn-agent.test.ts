@@ -9,7 +9,7 @@ import {
   type Logger,
 } from '@cairn/protocol'
 import { describe, expect, it } from 'vitest'
-import { spawnAgent } from './spawn-agent'
+import { RESTART_BACKOFF_MS, spawnAgent } from './spawn-agent'
 
 // ---------------------------------------------------------------------------------------------
 // The stand-in agent. A Node script handed to `node -e`, NOT a file on disk.
@@ -270,5 +270,93 @@ it('refuses to start an agent whose hello reports a different wire major', async
     code: 'E_AGENT_EXIT',
   })
   await agent.dispose()
+})
+
+it('restarts a crashed child with growing backoff, fails the in-flight caller, and re-arms the watch', async () => {
+  const { agent, clock, lines, stubEvents } = stub('crash-on-read')
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await waitFor(() => stubEvents.includes('stub.watch-start'), 'first watch.start')
+
+    const inFlight = agent.request('read', { changeCount: 1 })
+    // A caller mid-request gets a definite failure rather than hanging forever.
+    await expect(inFlight).resolves.toMatchObject({ ok: false, code: 'E_AGENT_EXIT' })
+
+    const scheduled = () => lines.filter((l) => l.event === 'agent.restart-scheduled')
+    expect(scheduled()).toHaveLength(1)
+    expect(scheduled()[0]!.fields).toEqual({ attempt: 1, durationMs: RESTART_BACKOFF_MS[0] })
+
+    clock.advance(RESTART_BACKOFF_MS[0])
+    await waitFor(() => stubEvents.filter((e) => e === 'stub.started').length === 2, 'second spawn')
+    // The restart re-sends watch.start, so a crash cannot silently stop the clipboard watch.
+    await waitFor(() => stubEvents.filter((e) => e === 'stub.watch-start').length === 2, 'watch re-armed')
+
+    await expect(agent.request('read', { changeCount: 2 })).resolves.toMatchObject({
+      ok: false,
+      code: 'E_AGENT_EXIT',
+    })
+    expect(scheduled()).toHaveLength(2)
+    expect(scheduled()[1]!.fields).toEqual({ attempt: 2, durationMs: RESTART_BACKOFF_MS[1] })
+  } finally {
+    await agent.dispose()
+  }
+})
+
+it('gives up after maxRestarts and answers every later request with E_AGENT_EXIT', async () => {
+  const { agent, clock, stubEvents } = stub('crash-on-read', 1)
+  try {
+    await agent.start()
+    await expect(agent.request('read', { changeCount: 1 })).resolves.toMatchObject({ ok: false, code: 'E_AGENT_EXIT' })
+    clock.advance(RESTART_BACKOFF_MS[0])
+    await waitFor(() => stubEvents.filter((e) => e === 'stub.started').length === 2, 'second spawn')
+    await expect(agent.request('read', { changeCount: 2 })).resolves.toMatchObject({ ok: false, code: 'E_AGENT_EXIT' })
+    // No third spawn: the host has given up, and says so instead of pretending.
+    clock.advance(60_000)
+    await expect(agent.request('read', { changeCount: 3 })).resolves.toEqual({
+      ok: false,
+      code: 'E_AGENT_EXIT',
+      message: 'agent gave up after 1 restarts',
+    })
+    expect(stubEvents.filter((e) => e === 'stub.started')).toHaveLength(2)
+  } finally {
+    await agent.dispose()
+  }
+})
+
+it('drops a line over MAX_LINE_BYTES and replaces the child instead of buffering it', async () => {
+  const { agent, lines } = stub('huge-line')
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await waitFor(
+      () => lines.some((l) => l.fields.code === 'E_LINE_TOO_LONG'),
+      'the oversized line to be rejected',
+    )
+    const tooLong = lines.find((l) => l.fields.code === 'E_LINE_TOO_LONG')!
+    expect(tooLong.event).toBe('agent.line-unparseable')
+    expect(tooLong.fields.byteLength).toBeGreaterThan(1_048_576)
+    await waitFor(() => lines.some((l) => l.event === 'agent.restart-scheduled'), 'a restart')
+  } finally {
+    await agent.dispose()
+  }
+})
+
+it('replaces the child after 10 unparseable lines in a row', async () => {
+  const { agent, lines } = stub('garbage')
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await waitFor(
+      () => lines.filter((l) => l.event === 'agent.line-unparseable').length >= 10,
+      'ten unparseable lines',
+    )
+    await waitFor(() => lines.some((l) => l.event === 'agent.restart-scheduled'), 'a restart')
+    const first = lines.find((l) => l.event === 'agent.line-unparseable')!
+    expect(first.fields.code).toBe('E_PARSE')
+    expect(first.fields.count).toBe(1)
+  } finally {
+    await agent.dispose()
+  }
 })
 })
