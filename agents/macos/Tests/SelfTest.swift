@@ -188,6 +188,10 @@ struct SelfTest {
     expect(large.rep.inline == nil && large.rep.repId != nil && large.stream != nil, "65 536 bytes travel as a stream")
     expectEqual(large.stream?.payloads.count, 2, "65 536 bytes is exactly two chunks")
     expectEqual(large.rep.sha256, contentHash(Data(repeating: 0x41, count: 65_536)), "a streamed rep declares the hash of the whole representation")
+    // 12. hot key state is observable without a key press
+    expect(Hotkey.current() == nil, "no accelerator is current before anything is registered")
+    expect(!Hotkey.register("Bogus+Nope"), "an unparseable accelerator reports bound:false rather than throwing")
+    expect(Hotkey.current() == nil, "a failed registration leaves no accelerator behind")
   }
 
   static func makeTiff(width: Int, height: Int) -> Data {
