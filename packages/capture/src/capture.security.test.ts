@@ -42,15 +42,28 @@ describe('capture writes nothing to disk', () => {
   })
 
   it('creates no new file under TMPDIR while capturing a 200 KB payload', async () => {
-    const { clock, agent, capture } = build()
-    await capture.start()
-    const before = fs.readdirSync(tmpdir())
-    agent.emitChanged(changed(600, [rep('text/plain', 'public.utf8-plain-text', `${TEST_CANARY} ${'x'.repeat(200_000)}`)]))
-    clock.advance(150); await capture.whenIdle()
-    const created = fs.readdirSync(tmpdir()).filter((n) => !before.includes(n))
-    expect(created).toEqual([])
-    for (const name of created) {
-      expect(fs.readFileSync(`${tmpdir()}/${name}`).includes(TEST_CANARY)).toBe(false)
+    // TMPDIR is redirected to a private empty directory for the duration. Reading the SHARED temp
+    // dir here would be flaky rather than strict: other vitest workers create store fixtures in it
+    // concurrently, so a before/after diff picks up their directories and fails for the wrong
+    // reason. `os.tmpdir()` re-reads $TMPDIR on every call, so this keeps the assertion exact —
+    // the private dir must end up completely empty.
+    const sandbox = fs.mkdtempSync(`${tmpdir()}/cairn-tmp-sandbox-`)
+    const prevTmp = process.env.TMPDIR
+    process.env.TMPDIR = sandbox
+    try {
+      const { clock, agent, capture } = build()
+      await capture.start()
+      agent.emitChanged(changed(600, [rep('text/plain', 'public.utf8-plain-text', `${TEST_CANARY} ${'x'.repeat(200_000)}`)]))
+      clock.advance(150); await capture.whenIdle()
+      const created = fs.readdirSync(sandbox)
+      expect(created).toEqual([])
+      for (const name of created) {
+        expect(fs.readFileSync(`${sandbox}/${name}`).includes(TEST_CANARY)).toBe(false)
+      }
+    } finally {
+      if (prevTmp === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = prevTmp
+      fs.rmSync(sandbox, { recursive: true, force: true })
     }
   })
 
