@@ -24,11 +24,11 @@ import {
   type Unsub,
 } from '@cairn/protocol'
 // The 5-minute TTL rule lives in ONE place, and it is not this file. `isPinnable` joins it in Step 36.
-import { secretExpiresAt } from '@cairn/privacy'
+import { isPinnable, secretExpiresAt } from '@cairn/privacy'
+import { bumpUpdatedAt, indexByContentHash } from './dedupe'
+import { DEFAULT_RETENTION, planEviction, type Eviction, type RetentionLimits } from './retention'
 import type { SearchIndex } from '@cairn/search'
 import type { Store } from '@cairn/store'
-import { DEFAULT_RETENTION, type RetentionLimits } from './retention'
-import { bumpUpdatedAt } from './dedupe'
 
 /** Injected rather than imported, so every history test can run without a real detector table. */
 export interface PrivacyPort {
@@ -103,6 +103,8 @@ export function createHistory(deps: HistoryDeps): History {
   const ord = new Map<ItemId, number>()
   const byHash = new Map<ContentHash, ItemId>()
   const listeners = new Set<(e: { reason: ChangeReason; total: number }) => void>()
+  /** False after evictPreviewCache() until the next load(). Guards `search()` (spec §11 control 6). */
+  let previewsLoaded = true
 
   const emit = (reason: ChangeReason): void => {
     for (const cb of listeners) cb({ reason, total: items.size })
@@ -129,7 +131,29 @@ export function createHistory(deps: HistoryDeps): History {
 
   return {
     async load() {
-      throw new Error('not implemented')
+      items.clear()
+      ord.clear()
+      byHash.clear()
+      search.clear()
+      for await (const rec of store.readAll()) {
+        if (!rec.ok) return rec
+        const ev = rec.value
+        if (ev.kind === 'ITEM_ADDED') {
+          items.set(ev.item.id, ev.item)
+          ord.set(ev.item.id, ev.seq)
+        } else if (ev.kind === 'ITEM_UPDATED') {
+          const cur = items.get(ev.id)
+          if (cur !== undefined) items.set(ev.id, { ...cur, ...ev.patch })
+        } else if (ev.kind === 'ITEM_DELETED') {
+          items.delete(ev.id)
+          ord.delete(ev.id)
+        }
+        // CHECKPOINT carries no item state in M1; the store owns maxSeq and the watermark vector.
+      }
+      for (const [hash, id] of indexByContentHash(items.values())) byHash.set(hash, id)
+      previewsLoaded = true
+      for (const it of items.values()) reindex(it)
+      return ok({ items: items.size })
     },
 
     async ingest(candidate) {
@@ -234,6 +258,7 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     search(q, limit) {
+      if (!previewsLoaded) return []
       const now = clock.now()
       const out: ScoredItem[] = []
       for (const hit of search.query(q, limit)) {
@@ -267,8 +292,25 @@ export function createHistory(deps: HistoryDeps): History {
       return ok(reps)
     },
 
-    async pin() {
-      throw new Error('not implemented')
+    async pin(id, pinned) {
+      const it = items.get(id)
+      if (it === undefined) return err('E_ITEM_NOT_FOUND', `no item ${id}`)
+      // Refuse loudly. A silently ignored pin is how a user believes a secret is being kept.
+      // `isPinnable` is Task 7's predicate, not a local `flags.includes('secret')`: one rule, one
+      // implementation, so an M2 flag that must also block pinning cannot be missed here.
+      if (pinned && !isPinnable(it.flags)) {
+        return err('E_PIN_REFUSED_SECRET', `item ${id} is secret-flagged and cannot be pinned`)
+      }
+      const now = clock.now()
+      const patch = { updatedAt: now, pinned }
+      const appended = await store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
+      if (!appended.ok) return appended
+      const next = { ...it, ...patch }
+      items.set(id, next)
+      reindex(next)
+      logger.info('history.pinned', { itemId: id, ok: pinned })
+      emit('update')
+      return ok({ pinned })
     },
 
     async remove(id) {
@@ -291,7 +333,33 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     async evictNow() {
-      throw new Error('not implemented')
+      const plan: readonly Eviction[] = planEviction([...items.values()], clock.now(), limits)
+      for (const ev of plan) {
+        const it = items.get(ev.id)
+        if (it === undefined) continue
+        // The local log always records the delete — the hash chain requires it — but the reason is
+        // never 'user', so `isSyncableDelete` keeps it off any future wire (spec §4).
+        const appended = await store.appendEvent({
+          kind: 'ITEM_DELETED',
+          id: ev.id,
+          reason: ev.reason,
+        })
+        if (!appended.ok) return appended
+        for (const ref of it.repRefs) {
+          const del = await store.deleteBlob(ref.blobId)
+          if (!del.ok) return del
+        }
+        if (it.thumbnailBlobId !== null) {
+          const del = await store.deleteBlob(it.thumbnailBlobId)
+          if (!del.ok) return del
+        }
+        forget(ev.id)
+      }
+      if (plan.length > 0) {
+        logger.info('history.evicted', { count: plan.length })
+        emit('evict')
+      }
+      return ok({ evicted: plan.length })
     },
 
     evictPreviewCache() {
