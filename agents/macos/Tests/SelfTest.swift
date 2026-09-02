@@ -27,6 +27,11 @@ struct SelfTest {
   }
 
   static func main() {
+    let args = Array(CommandLine.arguments.dropFirst())
+    if args.first == "--mark" {
+      mark(args.count > 1 ? args[1] : "")
+      return
+    }
     runAssertions()
     print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
@@ -197,5 +202,44 @@ struct SelfTest {
       plane[i] = UInt8((seed >> 16) & 0xFF)
     }
     return rep.tiffRepresentation!
+  }
+
+  /// Puts deliberately synthetic content with the awkward UTIs on the REAL pasteboard.
+  static func mark(_ which: String) {
+    let pb = NSPasteboard.general
+    switch which {
+    case "concealed":
+      let item = NSPasteboardItem()
+      item.setString("SYNTHETIC-NOT-A-REAL-SECRET", forType: .string)
+      item.setData(Data(), forType: NSPasteboard.PasteboardType(HintUTI.concealed))
+      pb.clearContents()
+      _ = pb.writeObjects([item])
+      print("marked: concealed + text, changeCount=\(pb.changeCount)")
+    case "files":
+      // Two paths that exist on every macOS install. Both facts below were measured: a file URL for
+      // a path that does NOT exist is dropped from the pasteboard entirely, and a writer that exits
+      // immediately after writeObjects can leave a foreign reader seeing only the first item.
+      pb.clearContents()
+      _ = pb.writeObjects([URL(fileURLWithPath: "/bin/ls") as NSURL, URL(fileURLWithPath: "/bin/cat") as NSURL])
+      print("marked: two file urls, changeCount=\(pb.changeCount)")
+    case "tiff":
+      let item = NSPasteboardItem()
+      item.setData(makeTiff(width: 200, height: 200), forType: NSPasteboard.PasteboardType(RepFilter.tiff))
+      pb.clearContents()
+      _ = pb.writeObjects([item])
+      print("marked: tiff only, changeCount=\(pb.changeCount)")
+    case "chrome":
+      let item = NSPasteboardItem()
+      item.setString("synthetic copied text", forType: .string)
+      item.setString("https://example.com/page", forType: NSPasteboard.PasteboardType(RepFilter.chromeSourceURL))
+      pb.clearContents()
+      _ = pb.writeObjects([item])
+      print("marked: text + chromium source-url, changeCount=\(pb.changeCount)")
+    default:
+      print("usage: cairn-agent-selftest --mark concealed|files|tiff|chrome")
+      exit(2)
+    }
+    // Do not exit instantly: a pasteboard write is asynchronous to the pasteboard server.
+    Thread.sleep(forTimeInterval: 0.5)
   }
 }
