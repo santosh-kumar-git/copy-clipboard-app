@@ -1,0 +1,1 @@
+{ "name": "@cairn/thumbs", "version": "0.1.0", "private": true, "devDependencies": { "node-gyp": "11.0.0" } }
