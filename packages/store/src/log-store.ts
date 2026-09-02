@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, ftruncateSync, openSync, readFileSync, statSync } from 'node:fs'
 import {
   err,
   ok,
@@ -40,6 +40,7 @@ export interface StoreStats {
   readonly logBytes: number
   readonly blobCount: number
   readonly blobBytes: number
+  readonly tornLineRepairedOnOpen: boolean
 }
 
 export interface OpenStoreOptions {
@@ -154,6 +155,26 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
       L.metaPath,
       JSON.stringify({ schemaVersion: 1, keyMode: 'unknown', scryptSaltB64: null } satisfies StoreMeta),
     )
+  }
+
+  // A crash can leave a half-written last line. The trailing `\n` is the commit marker, so a line
+  // without one never became durable: truncate it and log it. A complete line that fails to
+  // authenticate is the other case entirely — that is tamper, and readAll reports it.
+  let tornRepaired = false
+  if (existsSync(L.logPath)) {
+    const raw = readFileSync(L.logPath)
+    if (raw.length > 0 && raw[raw.length - 1] !== 0x0a) {
+      const cut = raw.lastIndexOf(0x0a)
+      const fd = openSync(L.logPath, 'r+')
+      try {
+        ftruncateSync(fd, cut + 1)
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
+      tornRepaired = true
+      opts.logger.warn('store.torn-line-discarded', { byteLength: raw.length - (cut + 1) })
+    }
   }
 
   const readLines = (): string[] => {
@@ -319,6 +340,7 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
         logBytes: existsSync(L.logPath) ? statSync(L.logPath).size : 0,
         blobCount: blobs.files().length,
         blobBytes: blobs.totalBytes(),
+        tornLineRepairedOnOpen: tornRepaired,
       })
     },
     readMeta() {

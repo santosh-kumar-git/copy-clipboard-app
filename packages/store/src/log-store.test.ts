@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ItemId, Result, StoreEvent } from '@cairn/protocol'
@@ -186,5 +186,40 @@ describe('meta.json', () => {
     // @ts-expect-error 'locked' is a runtime KeyringMode, never a persisted one
     const notPersistable: StoreMeta = { schemaVersion: 1, keyMode: 'locked', scryptSaltB64: null }
     void notPersistable
+  })
+
+  describe('a torn trailing line is a crash, not an attack', () => {
+    it('discards it on open, repairs the file, and keeps appending cleanly', async () => {
+      const { dir, key, store } = seeded(2)
+      store.close()
+      const path = join(dir, 'history.ndjson')
+      writeFileSync(path, `${readFileSync(path, 'utf8')}AAAApartialrecordwithoutanewline`)
+      const reopened = openAt(dir, key)
+      const stats = reopened.stat()
+      expect(stats.ok && stats.value.tornLineRepairedOnOpen).toBe(true)
+      expect(readFileSync(path, 'utf8').endsWith('\n')).toBe(true)
+      const records = await drain(reopened)
+      expect(records).toHaveLength(3)
+      expect(records.every((r) => r.ok)).toBe(true)
+      const appended = reopened.appendEvent({ kind: 'ITEM_DELETED', id: testItemId(1), reason: 'user' })
+      expect(appended.ok && appended.value.seq).toBe(4)
+      expect((await drain(reopened)).every((r) => r.ok)).toBe(true)
+    })
+
+    it('does NOT discard a complete, newline-terminated line whose bytes were altered', async () => {
+      const { dir, key, store } = seeded(2)
+      store.close()
+      const path = join(dir, 'history.ndjson')
+      const lines = readFileSync(path, 'utf8').split('\n').slice(0, -1)
+      lines[1] = (lines[1] as string).slice(0, -8) // still `\n`-terminated: a committed record
+      writeFileSync(path, `${lines.join('\n')}\n`)
+      const reopened = openAt(dir, key)
+      const stats = reopened.stat()
+      expect(stats.ok && stats.value.tornLineRepairedOnOpen).toBe(false)
+      const broken = (await drain(reopened)).find((r) => !r.ok)
+      expect(broken?.ok).toBe(false)
+      if (broken === undefined || broken.ok) throw new Error('unreachable')
+      expect(broken.code).toBe('E_STORE_DECRYPT')
+    })
   })
 })
