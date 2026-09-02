@@ -29,6 +29,7 @@ import { bumpUpdatedAt, indexByContentHash } from './dedupe'
 import { DEFAULT_RETENTION, planEviction, type Eviction, type RetentionLimits } from './retention'
 import type { SearchIndex } from '@cairn/search'
 import type { Store } from '@cairn/store'
+import { DEFAULT_RETENTION, type RetentionLimits } from './retention'
 
 /** Injected rather than imported, so every history test can run without a real detector table. */
 export interface PrivacyPort {
@@ -363,7 +364,11 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     evictPreviewCache() {
-      throw new Error('not implemented')
+      search.clear()
+      previewsLoaded = false
+      // JavaScript cannot zero a string, so the honest control is to drop every reference and stop
+      // answering searches until load() re-reads the encrypted store.
+      for (const [id, it] of items) items.set(id, { ...it, preview: '', maskSpans: [] })
     },
 
     get(id) {

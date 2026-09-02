@@ -111,19 +111,20 @@ function harness(retention?: RetentionLimits) {
   cleanups.push(cleanup)
   const clock = createTestClock()
   const key = randomTestKey()
+  const index = createSearchIndex()
   const mk = (): History => {
     const opened = openStore({ dir, key, clock, logger: silentLogger })
     if (!opened.ok) throw new Error(`openStore failed: ${opened.code} ${opened.message}`)
     return createHistory({
       store: opened.value,
       privacy: privacyPort,
-      search: createSearchIndex(),
+      search: index,
       clock,
       logger: silentLogger,
       ...(retention === undefined ? {} : { retention }),
     })
   }
-  return { dir, clock, mk }
+  return { dir, clock, mk, index }
 }
 
 describe('retention through history, with the injected clock', () => {
@@ -198,5 +199,46 @@ describe('retention through history, with the injected clock', () => {
     const second = mk()
     expect((await second.load()).ok).toBe(true)
     expect(second.list().items.map((i) => i.preview)).toEqual(['newer'])
+  })
+})
+
+describe('evictPreviewCache — the only thing that bounds the decrypted-preview window', () => {
+  it('clears the index and blanks the cached previews; search returns nothing until reloaded', async () => {
+    const { mk, clock, index } = harness()
+    const hist = mk()
+    const r = await hist.ingest(textCandidate('warehouse inventory report', clock.now()))
+    if (!r.ok || r.value.outcome !== 'added') throw new Error('expected outcome "added"')
+    expect(hist.search('wrhs', 10)).toHaveLength(1)
+    expect(index.size).toBe(1)
+
+    hist.evictPreviewCache()
+
+    // Look INSIDE the index, not just at what search() returns — otherwise deleting
+    // `search.clear()` from evictPreviewCache would leave this test green.
+    expect(index.size).toBe(0)
+    expect(index.debugHaystack()).toEqual([])
+    expect(hist.search('wrhs', 10)).toEqual([])
+    expect(hist.search('', 10)).toEqual([])
+    expect(hist.list().items[0]!.preview).toBe('')
+    expect(hist.list().items[0]!.maskSpans).toEqual([])
+    expect(JSON.stringify(hist.list())).not.toContain('warehouse')
+
+    const reloaded = await hist.load()
+    expect(reloaded.ok).toBe(true)
+    expect(hist.search('wrhs', 10)).toHaveLength(1)
+    expect(hist.list().items[0]!.preview).toBe('warehouse inventory report')
+  })
+
+  it('does not lose the items themselves — only their previews', async () => {
+    const { mk, clock } = harness()
+    const hist = mk()
+    const r = await hist.ingest(textCandidate('still here', clock.now()))
+    if (!r.ok || r.value.outcome !== 'added') throw new Error('expected outcome "added"')
+    hist.evictPreviewCache()
+    expect(hist.list().total).toBe(1)
+    // The bytes are in the encrypted store, so an explicit recall still works.
+    const reps = await hist.resolveReps(r.value.item.id)
+    expect(reps.ok).toBe(true)
+    if (reps.ok) expect(new TextDecoder().decode(reps.value[0]!.bytes)).toBe('still here')
   })
 })
