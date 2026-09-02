@@ -1,4 +1,5 @@
 export * from './agent'
+export * from './clock'
 export * from './constants'
 export * from './hash'
 export * from './log'
