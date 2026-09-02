@@ -69,11 +69,17 @@ Requires Node 24 (see `.nvmrc`) and, on macOS, Xcode Command Line Tools for `swi
 not needed.
 
 ```sh
-nvm use
+nvm use           # 24.20.0; every script refuses to run on anything older
 npm ci
+npm run app       # fetch Electron, build the agent + bundles, launch. The one command.
 npm test          # everything runs against fakes; no OS permissions needed
 # `npm run doctor` (platform capabilities and why anything is unavailable) lands in Milestone 2.
 ```
+
+`npm run app` is `bootstrap && build && start`; run those individually when you want one of them.
+Press **Cmd+Shift+V** once it is up. The window is an accessory panel, so it never appears in the
+Dock or the app switcher, and the app logs one NDJSON line per event to stdout — `hotkey.bound` at
+startup and `hotkey.fired` on each press are the two to look for.
 
 ## Distribution
 

@@ -4,22 +4,30 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=24.20.0" },
-  "workspaces": ["packages/*", "apps/desktop"],
+  "engines": {
+    "node": ">=24.20.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/desktop"
+  ],
   "scripts": {
-    "bootstrap": "node node_modules/electron/install.js",
+    "check:node": "node scripts/check-node.mjs",
+    "app": "node scripts/check-node.mjs && npm run bootstrap && npm run build && npm start",
+    "bootstrap": "node scripts/check-node.mjs && node node_modules/electron/install.js",
     "guard:no-rebuild": "node scripts/guard-no-electron-rebuild.mjs",
     "scan:transcripts": "node scripts/scan-transcripts.mjs",
     "gen:agent-types": "node tools/gen-agent-types.ts",
     "agent:macos": "make agent",
-    "typecheck": "tsc -p tsconfig.json && svelte-check --tsconfig apps/desktop/renderer/tsconfig.json --threshold error",
-    "test": "vitest run",
+    "typecheck": "node scripts/check-node.mjs && tsc -p tsconfig.json && svelte-check --tsconfig apps/desktop/renderer/tsconfig.json --threshold error",
+    "test": "node scripts/check-node.mjs && vitest run",
     "test:unit": "vitest run --project unit",
     "test:renderer": "vitest run --project renderer",
     "test:security": "vitest run --project security",
     "test:watch": "vitest",
-    "build": "npm run guard:no-rebuild && npm run agent:macos && electron-vite build",
-    "dev": "npm run agent:macos && electron-vite dev",
+    "build": "node scripts/check-node.mjs && npm run guard:no-rebuild && npm run agent:macos && electron-vite build",
+    "start": "node scripts/check-node.mjs && electron apps/desktop",
+    "dev": "node scripts/check-node.mjs && npm run agent:macos && electron-vite dev",
     "verify": "npm run guard:no-rebuild && npm run typecheck && npm run test && npm run scan:transcripts"
   },
   "devDependencies": {
