@@ -1,9 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   err,
   IPC_REQUEST_CHANNELS,
   ok,
-  type ChangeReason,
   type Item,
   type ItemId,
   type Logger,
@@ -12,6 +11,7 @@ import {
   type ScoredItem,
   type Unsub,
 } from '@cairn/protocol'
+import type { ChangeReason } from '@cairn/history'
 import type { History } from '@cairn/history'
 import {
   registerIpcHandlers,
@@ -25,7 +25,6 @@ const ID_B = '01KDVDNA011440E1G50G1G4080' as ItemId
 
 const silentLogger = (): { logger: Logger; events: string[] } => {
   const events: string[] = []
-  const push = (e: string) => () => { events.push(e) }
   const rec = (level: string) => (event: string) => { events.push(`${level}:${event}`) }
   return {
     events,

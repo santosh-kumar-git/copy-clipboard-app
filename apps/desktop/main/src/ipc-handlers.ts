@@ -128,7 +128,7 @@ export function registerIpcHandlers(deps: IpcDeps): Unsub {
     deps.ipcMain.handle(channel, async (_event, raw) => {
       const parsedParams = schemas.params.safeParse(raw)
       if (!parsedParams.success) {
-        deps.logger.warn('ipc.rejected', { method: undefined, code: 'E_IPC_REJECTED' })
+        deps.logger.warn('ipc.rejected', { code: 'E_IPC_REJECTED' })
         return err('E_IPC_REJECTED', z.prettifyError(parsedParams.error))
       }
 
