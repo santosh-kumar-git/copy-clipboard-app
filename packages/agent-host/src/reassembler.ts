@@ -1,5 +1,8 @@
 import {
   contentHash,
+  MAX_CONCURRENT_REP_STREAMS,
+  MAX_REP_BYTES,
+  REP_STREAM_TIMEOUT_MS,
   type Cancel,
   type Clock,
   type ContentHash,
@@ -65,8 +68,19 @@ export function createReassembler(opts: {
   onComplete: (repId: string, rep: ResolvedRep) => void
   onAbort: (abort: RepAbort) => void
 }): Reassembler {
-  const { logger, onComplete, onAbort } = opts
+  const { clock, logger, onComplete, onAbort } = opts
   const streams = new Map<string, RepStream>()
+  /**
+   * repIds whose `final: true` chunk has already been processed. Bounded FIFO, so it cannot grow.
+   * It exists to tell "the agent sent one chunk too many" (E_REP_AFTER_FINAL) apart from "the agent
+   * sent a chunk for an id it never declared" (E_REP_UNKNOWN_ID) — step 3 deletes the stream, so
+   * both look identical without it.
+   */
+  const ended: string[] = []
+  const markEnded = (repId: string): void => {
+    ended.push(repId)
+    if (ended.length > MAX_CONCURRENT_REP_STREAMS * 4) ended.shift()
+  }
 
   const abort = (s: RepStream, code: ErrorCode): void => {
     s.cancelTimeout()
@@ -79,8 +93,22 @@ export function createReassembler(opts: {
     onAbort({ repId: s.repId, mime: s.mime, code })
   }
 
+  const arm = (s: RepStream): void => {
+    s.cancelTimeout = clock.setTimeout(() => abort(s, 'E_REP_TIMEOUT'), REP_STREAM_TIMEOUT_MS)
+  }
+
+  const refuse = (rep: Rep & { repId: string }, code: ErrorCode): void => {
+    logger.warn('rep.stream-aborted', { code, repCount: streams.size })
+    onAbort({ repId: rep.repId, mime: rep.mime, code })
+  }
+
   return {
     declare(rep): void {
+      if (streams.has(rep.repId) || streams.size >= MAX_CONCURRENT_REP_STREAMS) {
+        return refuse(rep, 'E_REP_TOO_MANY')
+      }
+      // Refuse an oversized declaration before allocating anything at all.
+      if (rep.byteLength > MAX_REP_BYTES) return refuse(rep, 'E_REP_OVERFLOW')
       const s: RepStream = {
         repId: rep.repId,
         mime: rep.mime,
@@ -94,6 +122,7 @@ export function createReassembler(opts: {
         cancelTimeout: () => {},
       }
       streams.set(s.repId, s)
+      arm(s)
       logger.debug('rep.stream-begin', { mime: s.mime, byteLength: s.declaredBytes })
     },
 
@@ -101,19 +130,30 @@ export function createReassembler(opts: {
       const s = streams.get(c.repId)
       if (s === undefined) {
         // Nothing to abort: there is no stream to drop, so this is log-and-forget.
-        logger.warn('rep.stream-aborted', { code: 'E_REP_UNKNOWN_ID', repCount: streams.size })
+        const code = ended.includes(c.repId) ? 'E_REP_AFTER_FINAL' : 'E_REP_UNKNOWN_ID'
+        logger.warn('rep.stream-aborted', { code, repCount: streams.size })
         return
       }
       if (c.seq < s.expectedSeq) return abort(s, 'E_REP_SEQ_DUPLICATE')
       if (c.seq > s.expectedSeq) return abort(s, 'E_REP_SEQ_GAP')
       const bytes = decodeBase64(c.b64)
       if (bytes === null) return abort(s, 'E_REP_BAD_BASE64')
-      if (s.receivedBytes + bytes.length > s.declaredBytes) return abort(s, 'E_REP_OVERFLOW')
+      if (
+        s.receivedBytes + bytes.length > s.declaredBytes ||
+        s.receivedBytes + bytes.length > MAX_REP_BYTES
+      ) {
+        return abort(s, 'E_REP_OVERFLOW')
+      }
+      s.cancelTimeout()
       s.parts.push(bytes)
       s.receivedBytes += bytes.length
       s.expectedSeq += 1
-      if (!c.final) return
+      if (!c.final) {
+        arm(s)
+        return
+      }
       s.sawFinal = true
+      markEnded(s.repId)
       if (s.receivedBytes !== s.declaredBytes) return abort(s, 'E_REP_SHORT')
       const assembled = Buffer.concat(s.parts)
       const hash = contentHash(assembled)

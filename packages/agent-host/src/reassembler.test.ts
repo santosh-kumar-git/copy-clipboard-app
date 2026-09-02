@@ -2,6 +2,8 @@ import {
   CHUNK_PAYLOAD_BYTES,
   contentHash,
   createTestClock,
+  MAX_REP_BYTES,
+  REP_STREAM_TIMEOUT_MS,
   type LogEvent,
   type LogFields,
   type Logger,
@@ -197,5 +199,60 @@ it('aborts every open stream on abortAll', () => {
   expect(r.openStreams).toBe(0)
   expect(r.bufferedBytes).toBe(0)
   expect(clock.pending).toBe(0)
+})
+
+it('evicts a stream that never sends final, and leaks no buffer', () => {
+  const { completed, aborted, r, clock, lines } = harness()
+  const payload = fillerBytes(200_000)
+  r.declare(wireRep(payload, 'r1'))
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: chunksOf(payload)[0]! })
+  expect(r.bufferedBytes).toBe(CHUNK_PAYLOAD_BYTES)
+  clock.advance(REP_STREAM_TIMEOUT_MS - 1)
+  expect(r.openStreams).toBe(1)
+  clock.advance(1)
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_TIMEOUT'])
+  expect(completed).toEqual([])
+  expect(r.openStreams).toBe(0)
+  expect(r.bufferedBytes).toBe(0)
+  expect(clock.pending).toBe(0)
+  expect(lines.filter((l) => l.event === 'rep.stream-aborted')).toHaveLength(1)
+})
+
+it('aborts a representation that declares more than MAX_REP_BYTES without allocating', () => {
+  const { aborted, r, clock } = harness()
+  const huge = {
+    mime: 'image/tiff',
+    uti: null,
+    byteLength: MAX_REP_BYTES + 1,
+    sha256: contentHash(Buffer.alloc(0)),
+    repId: 'r1',
+  } as Rep & { repId: string }
+  r.declare(huge)
+  expect(aborted).toEqual([{ repId: 'r1', mime: 'image/tiff', code: 'E_REP_OVERFLOW' }])
+  expect(r.openStreams).toBe(0)
+  expect(clock.pending).toBe(0)
+})
+
+it('refuses a ninth concurrent stream with E_REP_TOO_MANY', () => {
+  const { aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  for (let i = 0; i < 8; i++) r.declare(wireRep(payload, `r${i}`))
+  expect(r.openStreams).toBe(8)
+  r.declare(wireRep(payload, 'r8'))
+  expect(aborted).toEqual([{ repId: 'r8', mime: 'image/tiff', code: 'E_REP_TOO_MANY' }])
+  expect(r.openStreams).toBe(8)
+})
+
+it('reports E_REP_AFTER_FINAL for a chunk that arrives after the final one', () => {
+  const { aborted, r, lines } = harness()
+  const payload = fillerBytes(70_000)
+  const parts = chunksOf(payload)
+  r.declare(wireRep(payload, 'r1'))
+  parts.forEach((b64, seq) => r.chunk({ repId: 'r1', seq, final: seq === parts.length - 1, b64 }))
+  r.chunk({ repId: 'r1', seq: 3, final: true, b64: 'aGk=' })
+  expect(aborted).toEqual([])
+  expect(lines.filter((l) => l.event === 'rep.stream-aborted').map((l) => l.fields.code)).toEqual([
+    'E_REP_AFTER_FINAL',
+  ])
 })
 })
