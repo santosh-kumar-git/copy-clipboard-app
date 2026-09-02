@@ -61,3 +61,73 @@ enum HotkeyMap {
     return (code, modifiers)
   }
 }
+
+enum Hotkey {
+  private static var ref: EventHotKeyRef?
+  private static var handler: EventHandlerRef?
+  private static var accelerator: String?
+  private static let signature: OSType = 0x4341_524E     // 'CARN'
+
+  /// MUST be called on the main thread: Carbon hot key events are delivered to the main run loop's
+  /// event dispatcher target.
+  static func register(_ accel: String) -> Bool {
+    unregister()
+    guard let parsed = HotkeyMap.parse(accel) else {
+      Out.log(.warn, "hotkey.unparseable", ["accelerator": .string(accel)])
+      return false
+    }
+    installHandlerIfNeeded()
+    var newRef: EventHotKeyRef?
+    let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+    let status = RegisterEventHotKey(
+      parsed.keyCode, parsed.modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &newRef)
+    guard status == noErr, let newRef else {
+      // -9878 is eventHotKeyExistsErr. [verified] it fires only for a duplicate registration WITHIN
+      // this process: two separate processes can both register Cmd+Shift+V and both get noErr. So
+      // `bound: true` means "the API accepted it", never "nobody else has it" — which is exactly why
+      // spec §4 makes a dead hot key a first-class UI state with a rebind row instead of trusting a
+      // return code.
+      Out.log(.warn, "hotkey.register-failed", ["accelerator": .string(accel), "status": .number(Double(status))])
+      return false
+    }
+    ref = newRef
+    accelerator = accel
+    return true
+  }
+
+  static func unregister() {
+    if let r = ref { UnregisterEventHotKey(r) }
+    ref = nil
+    accelerator = nil
+  }
+
+  static func current() -> String? { accelerator }
+
+  private static func installHandlerIfNeeded() {
+    guard handler == nil else { return }
+    var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    let callback: EventHandlerUPP = { _, event, _ in
+      var fired = EventHotKeyID()
+      let got = GetEventParameter(
+        event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+        nil, MemoryLayout<EventHotKeyID>.size, nil, &fired)
+      guard got == noErr, fired.signature == Hotkey.signature else { return noErr }
+      Hotkey.fire()
+      return noErr
+    }
+    InstallEventHandler(GetEventDispatcherTarget(), callback, 1, &spec, nil, &handler)
+  }
+
+  /// The focus token is opaque in M1 — nothing restores focus until M2 — but it is emitted from day
+  /// one so the wire never changes. It records who was frontmost the instant the key fired, which is
+  /// exactly what M2's focus.restore needs and what reading "previous app" at paste time cannot
+  /// give: while our accessory app is active, NSWorkspace.frontmostApplication returns *us*.
+  private static func fire() {
+    guard let accel = accelerator else { return }
+    let firedAt = Int(Date().timeIntervalSince1970 * 1000)
+    let snapshot = Frontmost.snapshot()
+    let token = "\(snapshot.bundleId ?? "unknown")|\(firedAt)"
+    // Alphabetical labels: HotkeyFiredData is (accelerator:firedAt:focusToken:).
+    Out.event("hotkey.fired", HotkeyFiredData(accelerator: accel, firedAt: firedAt, focusToken: token))
+  }
+}
