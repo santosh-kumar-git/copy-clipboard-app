@@ -1,0 +1,51 @@
+# --- node / build ---
+node_modules/
+dist/
+out/
+build/
+release/
+*.tsbuildinfo
+.vite/
+coverage/
+
+# --- swift agent build output ---
+agents/*/build/
+agents/**/.build/
+*.dSYM/
+bin/
+
+# --- editor / os ---
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- env / credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.mobileprovision
+signing/
+
+# --- local plan scratch ---
+docs/superpowers/plans/.parts/
+
+# --- NEVER COMMIT: real clipboard data ---
+# The app's own data dir holds an encrypted history, its wrapped master key, and blobs.
+# None of it belongs in a repo even encrypted.
+/data/
+*.ndjson.local
+key.bin
+blobs/
+spool/
+cairn-debug.log
+
+# Recorded agent transcripts (fixtures/agent-transcripts/*.ndjson) ARE committed on purpose —
+# they are what makes clipboard behaviour testable. They must contain SYNTHETIC content only.
+# tools/record-transcript.ts captures a real session, so anything it produces is unreviewed
+# real clipboard data until a human scrubs it. Staging area for unscrubbed captures:
+fixtures/agent-transcripts/*.raw.ndjson
+fixtures/agent-transcripts/unscrubbed/
