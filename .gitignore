@@ -49,3 +49,9 @@ cairn-debug.log
 # real clipboard data until a human scrubs it. Staging area for unscrubbed captures:
 fixtures/agent-transcripts/*.raw.ndjson
 fixtures/agent-transcripts/unscrubbed/
+
+# --- M1 additions ---
+apps/desktop/out/
+agents/macos/build/
+*.generated.swift.tmp
+.vitest-reports/

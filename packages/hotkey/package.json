@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/hotkey",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "global shortcut + failure states",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/hotkey",
+    "test:security": "vitest run --root ../.. --project security packages/hotkey"
+  },
+  "dependencies": { "@cairn/protocol": "0.1.0", "@cairn/agent-host": "0.1.0" }
+}

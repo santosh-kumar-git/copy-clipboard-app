@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install from the committed lockfile
+        run: npm ci
+      - name: No @electron/rebuild, no node-gyp, anywhere
+        run: npm run guard:no-rebuild
+      - name: Fetch the Electron binary (the one audited install step)
+        run: npm run bootstrap
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests
+        # `npm test` is `vitest run`, which runs EVERY project in vitest.config.ts — unit, renderer
+        # and security — including any project a later task adds. A per-project step list would
+        # silently skip whatever nobody remembered to name, and a skipped security project is an
+        # unenforced control. Do not split this back into `npm run test:unit` + `npm run
+        # test:security`: that is precisely how the renderer project would go unrun.
+        run: npm test
+      - name: Committed transcripts are synthetic
+        # `tools/record-transcript.ts` writes real clipboard bytes, so a committed transcript may
+        # never be trusted. Fail loudly if transcripts exist without the scanner: a missing security
+        # gate must not be a silently skipped step.
+        run: |
+          if [ -f scripts/scan-transcripts.mjs ]; then
+            npm run scan:transcripts
+          elif ls fixtures/agent-transcripts/*.ndjson >/dev/null 2>&1; then
+            echo "committed transcripts exist but scripts/scan-transcripts.mjs is missing" >&2
+            exit 1
+          else
+            echo "no committed transcripts and no scanner yet; both land with the Swift-agent task"
+          fi
+      - name: Audit
+        run: npm audit --audit-level=high

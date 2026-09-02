@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "encrypted append-only log + blobs",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/store",
+    "test:security": "vitest run --root ../.. --project security packages/store"
+  },
+  "dependencies": { "@cairn/protocol": "0.1.0" }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/agent-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "process lifecycle, framing, fakes",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/agent-host",
+    "test:security": "vitest run --root ../.. --project security packages/agent-host"
+  },
+  "dependencies": { "@cairn/protocol": "0.1.0", "zod": "4.5.4" }
+}

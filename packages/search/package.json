@@ -1,0 +1,13 @@
+{
+  "name": "@cairn/search",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ufuzzy ranking",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --root ../.. --project unit packages/search",
+    "test:security": "vitest run --root ../.. --project security packages/search"
+  },
+  "dependencies": { "@cairn/protocol": "0.1.0", "@leeoniya/ufuzzy": "1.0.19" }
+}

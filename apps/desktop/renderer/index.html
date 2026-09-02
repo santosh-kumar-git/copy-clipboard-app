@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- No inline script, no eval, no remote origin, and connect-src 'none' so this window cannot
+         make a network request at all (spec §11 control 1 and 4). The two banned CSP keywords are
+         deliberately NOT spelled out in this comment: `.html` is matched RAW by the source scanner
+         (Step 18, `findRawInSources`) because quotes in markup are content rather than syntax, so
+         this task's own `grep -rn` sweep over `apps/desktop packages` — and any later raw ban on
+         those keywords — would trip on the documentation instead of on a real weakening. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'"
+    />
+    <title>Cairn</title>
+  </head>
+  <body>
+    <main id="app">Cairn scaffold window</main>
+  </body>
+</html>

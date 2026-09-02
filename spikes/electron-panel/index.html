@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>panel spike</title>
+    <style>
+      body { font: 15px -apple-system, sans-serif; margin: 0; padding: 12px; color: #fff; }
+      input { width: 100%; font-size: 20px; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <input id="q" placeholder="type here — do the keys arrive?" autofocus />
+    <p id="echo"></p>
+    <script>
+      const q = document.getElementById('q')
+      const echo = document.getElementById('echo')
+      q.addEventListener('input', () => { echo.textContent = 'renderer saw: ' + q.value })
+    </script>
+  </body>
+</html>
