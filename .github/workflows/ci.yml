@@ -37,7 +37,29 @@ jobs:
         # silently skip whatever nobody remembered to name, and a skipped security project is an
         # unenforced control. Do not split this back into `npm run test:unit` + `npm run
         # test:security`: that is precisely how the renderer project would go unrun.
-        run: npm test
+        timeout-minutes: 12
+        # Observed on CI: every one of the 70 files reports ✓ and then the job sits there with no
+        # summary line, which means the run finished and something is keeping the process alive
+        # during teardown. A bare `npm test` cannot tell us WHAT, and the job timeout kills the
+        # runner before anything is printed. So: run it in the background, and if it overruns, dump
+        # the process tree and the open files of whatever node processes remain before killing it.
+        # That names the lingering handle instead of leaving it to guesswork.
+        run: |
+          set -o pipefail
+          npm test & TEST_PID=$!
+          (
+            sleep 540
+            echo "::error::npm test exceeded 9 minutes after the last test file — dumping state"
+            ps -Ao pid,ppid,etime,command | grep -iE 'vitest|node|swift|Electron' | grep -v grep || true
+            for p in $(pgrep -f vitest || true); do
+              echo "--- lsof for pid $p ---"
+              lsof -p "$p" 2>/dev/null | tail -40 || true
+            done
+            kill -9 "$TEST_PID" 2>/dev/null || true
+          ) & WATCHDOG_PID=$!
+          wait "$TEST_PID"; STATUS=$?
+          kill "$WATCHDOG_PID" 2>/dev/null || true
+          exit $STATUS
       - name: Committed transcripts are synthetic
         # `tools/record-transcript.ts` writes real clipboard bytes, so a committed transcript may
         # never be trusted. Fail loudly if transcripts exist without the scanner: a missing security
