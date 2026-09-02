@@ -20,6 +20,7 @@ import {
 } from '@cairn/protocol'
 import { createCorrelator, type Correlator } from './correlator'
 import { createLineSplitter } from './framing'
+import { createChangeAssembler } from './reassembler'
 
 /** Sent as `hello.params.hostVersion`. */
 export const HOST_VERSION = '0.1.0'
@@ -68,6 +69,16 @@ export function createAgentCore(opts: {
     log: new Set(),
   }
 
+  const emit = <E extends keyof AgentEventMap>(event: E, payload: AgentEventMap[E]): void => {
+    for (const cb of [...listeners[event]]) cb(payload)
+  }
+
+  const changes = createChangeAssembler({
+    clock,
+    logger,
+    emit: (payload) => emit('clipboard.changed', payload),
+  })
+
   let consecutiveParseFailures = 0
   let lastWatchIntervalMs: number | null = null
   let lastAccelerator: string | null = null
@@ -98,7 +109,28 @@ export function createAgentCore(opts: {
         logger.warn('agent.line-unparseable', { code: 'E_UNKNOWN_METHOD', method: l.method })
         return
       }
-      if (l.t === 'res') correlator.settle(l)
+      if (l.t === 'res') {
+        correlator.settle(l)
+        return
+      }
+      switch (l.event) {
+        case 'clipboard.changed':
+          changes.handleChanged(l.data)
+          return
+        case 'rep.chunk':
+          // The payload we hand listeners carries NO bytes — just enough to draw a progress row.
+          emit('rep.chunk', { repId: l.data.repId, seq: l.data.seq, final: l.data.final })
+          changes.handleChunk(l.data)
+          return
+        case 'hotkey.fired':
+          logger.info('hotkey.fired', { accelerator: l.data.accelerator })
+          emit('hotkey.fired', l.data)
+          return
+        case 'log':
+          // `fields` is dropped on purpose: the agent is not trusted to keep clipboard content out.
+          emit('log', { level: l.data.level, event: l.data.event })
+          return
+      }
     },
 
     async request<M extends AgentMethod>(
@@ -142,8 +174,8 @@ export function createAgentCore(opts: {
       correlator.failAll(code, message)
     },
 
-    abortStreams(): void {
-      // Wired to the change assembler in Step 37.
+    abortStreams(code): void {
+      changes.abortAll(code)
     },
 
     resetFraming(): void {
@@ -161,7 +193,7 @@ export function createAgentCore(opts: {
       return correlator.pending
     },
     get openRepStreams(): number {
-      return 0
+      return changes.openStreams
     },
   }
 

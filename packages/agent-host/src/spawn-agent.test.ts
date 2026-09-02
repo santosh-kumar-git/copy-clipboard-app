@@ -1,6 +1,9 @@
 import {
   AGENT_REQUEST_TIMEOUT_MS,
+  CHUNK_PAYLOAD_BYTES,
+  contentHash,
   createTestClock,
+  type ClipboardChangedPayload,
   type LogEvent,
   type LogFields,
   type Logger,
@@ -116,6 +119,23 @@ function stub(mode: string, maxRestarts?: number) {
   return { agent, clock, lines, stubEvents }
 }
 
+/** Polls with REAL timers — allowed in a test; product code only ever uses the injected Clock. */
+async function waitFor(cond: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+/** The one payload rule, shared with the committed transcript: filler plus a TIFF magic prefix. */
+function fillerBytes(n: number): Buffer {
+  const b = Buffer.alloc(n)
+  for (let i = 0; i < n; i++) b[i] = (i * 7 + 13) % 251
+  b.set([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00], 0)
+  return b
+}
+
 describe('spawnAgent', () => {
   it('starts the child, sends hello and returns its capabilities', async () => {
     const { agent, lines } = stub('normal')
@@ -187,4 +207,54 @@ describe('spawnAgent', () => {
     // dispose() is idempotent.
     await agent.dispose()
   })
+
+it('parses two events that arrive in one stdout write as two events', async () => {
+  const { agent, stubEvents } = stub('two-in-one-write')
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await waitFor(() => stubEvents.includes('second'), 'both events')
+    expect(stubEvents).toEqual(['stub.started', 'stub.watch-start', 'first', 'second'])
+  } finally {
+    await agent.dispose()
+  }
+})
+
+it('reassembles a >64 KiB representation off the real pipe and emits chunk progress with no bytes', async () => {
+  const { agent, stubEvents } = stub('chunked-image')
+  const changes: ClipboardChangedPayload[] = []
+  const chunks: { repId: string; seq: number; final: boolean }[] = []
+  agent.on('clipboard.changed', (p) => changes.push(p))
+  agent.on('rep.chunk', (p) => chunks.push(p))
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await waitFor(() => changes.length === 1, 'the reassembled clipboard.changed')
+    expect(stubEvents).toContain('stub.watch-start')
+
+    const payload = fillerBytes(200_000)
+    const change = changes[0]!
+    expect(change.changeCount).toBe(364)
+    expect(change.changeToken).toBe('364')
+    expect(change.droppedReps).toEqual([])
+    expect(change.reps.map((r) => r.mime)).toEqual(['text/plain', 'image/tiff'])
+    expect(Buffer.from(change.reps[0]!.bytes).toString('utf8')).toBe('hello world')
+    expect(Buffer.from(change.reps[1]!.bytes).equals(payload)).toBe(true)
+    expect(change.reps[1]!.sha256).toBe(contentHash(payload))
+    expect(change.sourceApp).toEqual({
+      bundleId: 'com.apple.Preview',
+      name: 'Preview',
+      confidence: 'heuristic',
+    })
+
+    expect(chunks).toHaveLength(Math.ceil(200_000 / CHUNK_PAYLOAD_BYTES))
+    expect(chunks.map((c) => c.seq)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    expect(chunks[6]).toEqual({ repId: 'rep-1', seq: 6, final: true })
+    // The progress payload carries NO bytes. If a `b64` or `bytes` key ever appears here, the
+    // renderer could be handed raw clipboard content through a progress indicator.
+    expect(Object.keys(chunks[0]!)).toEqual(['repId', 'seq', 'final'])
+  } finally {
+    await agent.dispose()
+  }
+})
 })
