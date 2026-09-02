@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { STORE_KEY_FILE } from '@cairn/protocol'
+import { STORE_KEY_FILE, type Logger } from '@cairn/protocol'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createKeyring } from './keyring'
 import { createCapturingLogger, createFakeSafeStorage, type CapturingLogger } from './testing'
@@ -172,3 +172,20 @@ describe('spec §11 control 6 — key.bin never holds the raw key', () => {
     }
   })
 })
+
+/**
+ * Compile-time half of spec §11 control 2. Never called at runtime: `tsc` is the assertion. If
+ * `LogFields` ever grows an index signature, every directive below becomes
+ * `TS2578: Unused '@ts-expect-error' directive` and `npm run typecheck` fails.
+ */
+export function logFieldsProof(log: Logger, masterKey: Buffer, passphrase: string): void {
+  log.info('keyring.mode', { mode: 'os-keyring' })
+  // @ts-expect-error the master key is not a LogFields key
+  log.info('keyring.mode', { mode: 'os-keyring', key: masterKey.toString('base64') })
+  // @ts-expect-error a passphrase is not a LogFields key
+  log.warn('keyring.unlock-failed', { passphrase })
+  // @ts-expect-error mode is a KeyringMode, not a free-form string
+  log.info('keyring.mode', { mode: masterKey.toString('hex') })
+  // @ts-expect-error the event name is a closed union: no ad-hoc message can carry the key
+  log.info('keyring: master key is ' + masterKey.toString('base64'))
+}
