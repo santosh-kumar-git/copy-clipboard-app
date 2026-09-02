@@ -288,4 +288,11 @@ Thread.detachNewThread {
   exit(0)
 }
 
-RunLoop.main.run()
+// NSApp.run(), NOT RunLoop.main.run(). The window server posts kEventHotKeyPressed into this
+// process's *application* event queue; something has to dequeue it. RunLoop.main.run() spins the
+// CFRunLoop but never drains that queue, and NSApplication.shared on its own does not either — it
+// does not even call finishLaunching(). The observable symptom is the worst kind: RegisterEventHotKey
+// returns noErr, the agent reports `bound: true`, and pressing the key does nothing at all, which
+// looks like a UI bug rather than a run-loop bug. NSApp.run() calls finishLaunching() and then pumps
+// the queue, so the Carbon dispatcher target actually receives the event.
+NSApp.run()

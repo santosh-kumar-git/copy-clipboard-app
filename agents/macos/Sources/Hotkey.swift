@@ -111,6 +111,11 @@ enum Hotkey {
       let got = GetEventParameter(
         event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
         nil, MemoryLayout<EventHotKeyID>.size, nil, &fired)
+      // Logged before the signature guard on purpose. "No hotkey.event line at all" means the
+      // application event queue is not being pumped (see NSApp.run() in main.swift); "an event line
+      // but no hotkey.fired" means it arrived and was filtered. Without this, the two are
+      // indistinguishable from the outside, which is what made the dead-hot-key bug hard to place.
+      Out.log(.debug, "hotkey.event", ["got": .number(Double(got)), "signature": .number(Double(fired.signature))])
       guard got == noErr, fired.signature == Hotkey.signature else { return noErr }
       Hotkey.fire()
       return noErr
