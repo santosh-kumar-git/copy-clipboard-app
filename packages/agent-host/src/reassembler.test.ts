@@ -111,4 +111,91 @@ describe('createReassembler', () => {
     expect(completed[0]!.rep.mime).toBe('image/png')
     expect(completed[1]!.rep.mime).toBe('image/tiff')
   })
+
+it('discards the whole representation on a sha256 mismatch', () => {
+  const { completed, aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  const lying = { ...wireRep(payload, 'r1'), sha256: contentHash(Buffer.from('something else')) }
+  r.declare(lying as Rep & { repId: string })
+  chunksOf(payload).forEach((b64, seq, all) =>
+    r.chunk({ repId: 'r1', seq, final: seq === all.length - 1, b64 }),
+  )
+  expect(completed).toEqual([])
+  expect(aborted).toEqual([{ repId: 'r1', mime: 'image/tiff', code: 'E_REP_HASH_MISMATCH' }])
+  expect(r.openStreams).toBe(0)
+  expect(r.bufferedBytes).toBe(0)
+})
+
+it('discards the representation on a gap in seq', () => {
+  const { completed, aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  const parts = chunksOf(payload)
+  r.declare(wireRep(payload, 'r1'))
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: parts[0]! })
+  r.chunk({ repId: 'r1', seq: 2, final: true, b64: parts[2]! })
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_SEQ_GAP'])
+  expect(completed).toEqual([])
+})
+
+it('discards the representation on a duplicated seq', () => {
+  const { completed, aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  const parts = chunksOf(payload)
+  r.declare(wireRep(payload, 'r1'))
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: parts[0]! })
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: parts[0]! })
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_SEQ_DUPLICATE'])
+  expect(completed).toEqual([])
+})
+
+it('aborts with E_REP_SHORT when final arrives with fewer bytes than declared', () => {
+  const { aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  const parts = chunksOf(payload)
+  r.declare({ ...wireRep(payload, 'r1'), byteLength: 70_000 + 3 } as Rep & { repId: string })
+  parts.forEach((b64, seq) => r.chunk({ repId: 'r1', seq, final: seq === parts.length - 1, b64 }))
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_SHORT'])
+})
+
+it('aborts on undecodable base64', () => {
+  const { aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  r.declare(wireRep(payload, 'r1'))
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: 'not!valid!base64' })
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_BAD_BASE64'])
+})
+
+it('aborts when the accumulated bytes exceed the declared byteLength', () => {
+  const { aborted, r } = harness()
+  const payload = fillerBytes(70_000)
+  // Declare it 100 bytes shorter than it is: chunk 2 then overflows.
+  const short = { ...wireRep(payload, 'r1'), byteLength: 70_000 - 100 }
+  r.declare(short as Rep & { repId: string })
+  const parts = chunksOf(payload)
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: parts[0]! })
+  r.chunk({ repId: 'r1', seq: 1, final: false, b64: parts[1]! })
+  r.chunk({ repId: 'r1', seq: 2, final: true, b64: parts[2]! })
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_OVERFLOW'])
+})
+
+it('logs E_REP_UNKNOWN_ID and drops a chunk for an undeclared repId', () => {
+  const { aborted, r, lines } = harness()
+  r.chunk({ repId: 'nope', seq: 0, final: true, b64: 'aGk=' })
+  expect(aborted).toEqual([])
+  expect(lines).toEqual([
+    { level: 'warn', event: 'rep.stream-aborted', fields: { code: 'E_REP_UNKNOWN_ID', repCount: 0 } },
+  ])
+})
+
+it('aborts every open stream on abortAll', () => {
+  const { aborted, r, clock } = harness()
+  const payload = fillerBytes(200_000)
+  r.declare(wireRep(payload, 'r1'))
+  r.chunk({ repId: 'r1', seq: 0, final: false, b64: chunksOf(payload)[0]! })
+  r.abortAll('E_REP_TIMEOUT')
+  expect(aborted.map((a) => a.code)).toEqual(['E_REP_TIMEOUT'])
+  expect(r.openStreams).toBe(0)
+  expect(r.bufferedBytes).toBe(0)
+  expect(clock.pending).toBe(0)
+})
 })
