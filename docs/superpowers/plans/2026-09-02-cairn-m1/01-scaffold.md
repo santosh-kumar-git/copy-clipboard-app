@@ -871,8 +871,12 @@ deliberately **not** `text/uri-list` — a source-url rider is provenance metada
 npx vitest run packages/protocol/src/constants.test.ts
 ```
 
-Expected: FAIL with `Error: Failed to resolve import "./constants" from
-"packages/protocol/src/constants.test.ts". Does the file exist?`
+Expected: FAIL with
+`Error: Cannot find module './constants' imported from …/packages/protocol/src/constants.test.ts`,
+then `Test Files 1 failed (1)` / `Tests no tests`. Note the wording is project-specific and both
+forms appear in this task: the `unit` project resolves through Node and says **`Cannot find module`**,
+while the `security` project runs through vite's plugin pipeline and says
+**`Failed to resolve import`** (Step 15). Either one is the right red; a *different* error is not.
 
 ---
 
@@ -1029,8 +1033,9 @@ Run it and watch it fail:
 npx vitest run packages/protocol/src/testing.test.ts
 ```
 
-Expected: FAIL with `Error: Failed to resolve import "./testing" from
-"packages/protocol/src/testing.test.ts". Does the file exist?`
+Expected: FAIL with
+`Error: Cannot find module './testing' imported from …/packages/protocol/src/testing.test.ts`
+(the `unit` project's wording — see Step 8).
 
 Now write it. `packages/protocol/src/testing.ts` — contract §7's two lines verbatim:
 
@@ -1481,8 +1486,10 @@ change. Run it now:
 npx vitest run security/source-scan.test.ts
 ```
 
-Expected: FAIL with `Error: Failed to resolve import "./source-scan" from
-"security/source-scan.test.ts". Does the file exist?`
+Expected: FAIL with
+`Error: Cannot find module './source-scan' imported from …/security/source-scan.test.ts` — this file
+runs in the `unit` project, so it gets Node's wording, not the `Failed to resolve import` form Step 15
+sees in the `security` project.
 
 ---
 
@@ -1650,7 +1657,12 @@ Expected: FAIL with `AssertionError: electron must be exact, not a range: expect
 
 ```sh
 # 2. put it back and confirm green again
-npm pkg set devDependencies.electron='44.1.1'
+# Use git, NOT `npm pkg set`: writing the value back leaves the pin correct but does NOT restore the
+# file byte-for-byte, because `npm pkg set` reformats the whole document on write — it expands
+# `engines` and `workspaces` from one line each onto multiple lines. `git diff --stat` then reports
+# `1 file changed, 8 insertions(+), 2 deletions(-)` and the next commit carries unrelated churn.
+git checkout -- package.json
+grep '"electron"' package.json        # Expected: "electron": "44.1.1",
 git diff --stat package.json          # Expected: no output — the file is byte-identical again
 npx vitest run --project security security/supply-chain.security.test.ts
 ```
@@ -1888,7 +1900,9 @@ find apps/desktop/out -type f | sort
 npx electron apps/desktop
 ```
 
-Expected build output: main `✓ 3 modules transformed` → `apps/desktop/out/main/index.js 1.36 kB`;
+Expected build output: main `✓ 4 modules transformed` → `apps/desktop/out/main/index.js 1.52 kB`;
+(four, not three: the barrel's second line pulls `testing.ts` in behind `constants.ts` — see the note
+after this step);
 preload `✓ 1 modules transformed` plus the line `Generated an empty chunk: "index".` — that warning
 is expected until the IPC task fills the preload, and is not an error; renderer
 `../out/renderer/index.html 0.63 kB`. `find` lists exactly three files.
@@ -1905,6 +1919,17 @@ grep -n 'DATA_DIR_NAME\|require(' apps/desktop/out/main/index.js | head -5
 
 Expected: `const node_path = require("node:path")`, `const electron = require("electron")`, and
 `const DATA_DIR_NAME = "Cairn";` — `@cairn/protocol` is inlined, not required.
+
+**A consequence to know, and deliberately not fixed in M1.** You will also see
+`const node_url = require("node:url")` and a bare expression computing `REPO_ROOT` from
+`__filename`. That is `packages/protocol/src/testing.ts` — a *test-only* fixture-path helper — being
+bundled into the production main process, because the public barrel re-exports `./testing` (contract
+§5 D2) and Task 7's fixture tests import `fixturePath` from `@cairn/protocol`. It is dead code: the
+value is discarded, nothing calls it, and it leaks nothing. It costs ~160 bytes and one extra module.
+Do **not** "fix" it by dropping `./testing` from the barrel — that breaks Task 7's imports and the
+eleven-line barrel the contract freezes. The clean fix is a second subpath export
+(`"./testing": "./src/testing.ts"`) so test helpers never reach the app bundle, which is a contract
+change and therefore a deliberate M2+ decision, not a mid-task edit.
 
 ---
 
