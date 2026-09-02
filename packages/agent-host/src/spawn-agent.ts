@@ -165,7 +165,15 @@ export function createAgentCore(opts: {
       if (method === 'hello') helloId = id
       const line = JSON.stringify({ v: WIRE_MAJOR, t: 'req', id, method, params }) + '\n'
       const promise = correlator.register<AgentResult<M>>(id, method, timeoutMs)
-      const written = send(line)
+      let written: Result<void>
+      try {
+        written = send(line)
+      } catch (e) {
+        // The fake agent throws when the host goes off-script. Settle the pending entry so no timer
+        // is left armed, then rethrow so the test fails loudly instead of quietly returning an Err.
+        correlator.fail(id, 'E_INTERNAL', e instanceof Error ? e.message : String(e))
+        throw e
+      }
       if (!written.ok) {
         correlator.fail(id, written.code, written.message)
         return promise

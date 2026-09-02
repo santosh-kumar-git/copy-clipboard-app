@@ -92,8 +92,20 @@ export function createFakeAgent(opts: {
     const actual = JSON.parse(line) as Record<string, unknown>
     outboundCount += 1
     const frame = transcript.frames[cursor]
-    if (frame === undefined || frame.dir !== 'in') throw record('FakeAgent: off-script request')
-    if (!matchesPattern(frame.line, actual)) throw record('FakeAgent: script mismatch')
+    if (frame === undefined || frame.dir !== 'in') {
+      throw record(
+        `FakeAgent: unexpected outbound request \`${String(actual['method'])}\` — ` +
+          `the transcript scripts no further requests.`,
+      )
+    }
+    if (!matchesPattern(frame.line, actual)) {
+      throw record(
+        `FakeAgent: outbound request #${outboundCount} did not match the transcript script.\n` +
+          `  transcript: ${JSON.stringify({ method: frame.line['method'], params: frame.line['params'] })}\n` +
+          `  actual:     ${JSON.stringify({ method: actual['method'], params: actual['params'] })}\n` +
+          `  transcript: ${where} line ${frame.fileLine}`,
+      )
+    }
     lastMatchedId = String(actual['id'])
     cursor += 1
     pump()
@@ -130,7 +142,14 @@ export function createFakeAgent(opts: {
     assertDrained(): void {
       if (failure !== null) throw failure
       const remaining = transcript.frames.length - cursor
-      if (remaining > 0) throw new Error(`FakeAgent: ${remaining} frames unplayed`)
+      if (remaining > 0) {
+        const next = transcript.frames[cursor]!
+        const label = String(next.line['method'] ?? next.line['event'] ?? 'unknown')
+        throw new Error(
+          `FakeAgent: transcript not fully consumed — ${remaining} of ${transcript.frames.length} ` +
+            `frames unplayed (next: ${next.dir} ${label}).`,
+        )
+      }
     },
 
     get framesPlayed(): number {

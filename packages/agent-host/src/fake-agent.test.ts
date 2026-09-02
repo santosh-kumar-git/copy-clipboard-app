@@ -89,4 +89,49 @@ describe('createFakeAgent', () => {
       message: 'fake agent has been disposed',
     })
   })
+
+it('fails when the host sends a request the transcript did not script', async () => {
+  const clock = createTestClock()
+  const { logger } = recordingLogger()
+  const agent = createFakeAgent({ transcriptPath: fixture('hello-watch-text.ndjson'), clock, logger })
+  await agent.start()
+  let message = ''
+  try {
+    await agent.request('watch.start', { intervalMs: 250 })
+  } catch (e) {
+    message = (e as Error).message
+  }
+  // The message names both sides and the exact fixture line, so drift is diagnosable at a glance.
+  expect(message).toBe(
+    'FakeAgent: outbound request #2 did not match the transcript script.\n' +
+      '  transcript: {"method":"watch.start","params":{"intervalMs":500}}\n' +
+      '  actual:     {"method":"watch.start","params":{"intervalMs":250}}\n' +
+      '  transcript: hello-watch-text.ndjson line 4',
+  )
+  // The rejected request must not leave a timer armed.
+  expect(clock.pending).toBe(0)
+  expect(() => agent.assertDrained()).toThrow(/did not match the transcript script/)
+})
+
+it('fails when the host sends a request after the transcript is exhausted', async () => {
+  const clock = createTestClock()
+  const { logger } = recordingLogger()
+  const agent = createFakeAgent({ transcriptPath: fixture('hello-watch-text.ndjson'), clock, logger })
+  await agent.start()
+  await agent.request('watch.start', { intervalMs: 500 })
+  clock.advance(500)
+  await expect(agent.request('read', { changeCount: 364 })).rejects.toThrow(
+    'FakeAgent: unexpected outbound request `read` — the transcript scripts no further requests.',
+  )
+})
+
+it('assertDrained names what is left unplayed', async () => {
+  const clock = createTestClock()
+  const { logger } = recordingLogger()
+  const agent = createFakeAgent({ transcriptPath: fixture('hello-watch-text.ndjson'), clock, logger })
+  await agent.start()
+  expect(() => agent.assertDrained()).toThrow(
+    'FakeAgent: transcript not fully consumed — 3 of 5 frames unplayed (next: in watch.start).',
+  )
+})
 })
