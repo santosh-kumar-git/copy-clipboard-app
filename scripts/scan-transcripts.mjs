@@ -19,6 +19,7 @@
  * Exit codes: 0 = clean, 1 = findings, 2 = cannot scan.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { registerHooks } from 'node:module'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -111,7 +112,26 @@ export function scanTranscript(path, detect) {
  * The product's own detectors, never a copy of them. Throws if @cairn/privacy has not been built yet
  * (Task 7 owns it) — the caller must fail closed rather than scan with something weaker.
  */
+/**
+ * Node's ESM resolver has no extension search, but every relative import inside `@cairn/*` is
+ * extensionless by contract §2 — vite, vitest and tsc resolve those, plain `node` does not. This is
+ * the same hook `tools/gen-agent-types.ts` installs, and for the same reason: it is the only way a
+ * plain-Node entry point can load the package source with no build step.
+ */
+function registerExtensionlessTsResolution() {
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier.startsWith('.') && !/\.[cm]?[jt]s$/.test(specifier) && context.parentURL !== undefined) {
+        const candidate = new URL(`${specifier}.ts`, context.parentURL)
+        if (existsSync(fileURLToPath(candidate))) return { url: candidate.href, shortCircuit: true }
+      }
+      return nextResolve(specifier, context)
+    },
+  })
+}
+
 export async function loadDetector() {
+  registerExtensionlessTsResolution()
   const { ALL_DETECTORS, detectSpans } = await import('@cairn/privacy')
   if (typeof detectSpans !== 'function' || !Array.isArray(ALL_DETECTORS)) {
     throw new Error('@cairn/privacy does not export detectSpans and ALL_DETECTORS')
