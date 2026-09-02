@@ -28,10 +28,7 @@ export const LOAD_FAILED_TEXT = 'Cairn could not read its history'
 
 /** Mirrors `TOAST_COPIED_MANUAL` / `TOAST_COPIED_SECURE_INPUT` in `@cairn/protocol`; asserted equal
  *  by palette-state.test.ts, because the renderer cannot import that barrel at runtime. */
-export const RECALL_TOAST_TEXT: Readonly<Record<
-  'user-preference' | 'no-permission' | 'elevated-target' | 'secure-input',
-  string
->> = {
+export const RECALL_TOAST_TEXT: Readonly<Record<CopyReason, string>> = {
   'user-preference': 'Copied — press Cmd+V',
   'no-permission': 'Copied — press Cmd+V',
   'elevated-target': 'Copied — press Cmd+V',
