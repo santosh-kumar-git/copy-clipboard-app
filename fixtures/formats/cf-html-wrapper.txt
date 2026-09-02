@@ -1,0 +1,8 @@
+Version:0.9
+StartHTML:0000000105
+EndHTML:0000000202
+StartFragment:0000000138
+EndFragment:0000000168
+<html><body>
+<!--StartFragment--><p>Hello <b>bold</b> world</p><!--EndFragment-->
+</body></html>
