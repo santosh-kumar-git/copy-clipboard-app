@@ -119,6 +119,16 @@ const HANDLERS: Record<IpcRequestChannel, Handler> = {
  *    hand the renderer a shape it will treat as trustworthy.
  * The reply envelope is `Result<T>` (contract §6); `result` validates the `value`.
  */
+const isRecord = (u: unknown): u is Record<string, unknown> =>
+  typeof u === 'object' && u !== null && !Array.isArray(u)
+
+/**
+ * Field paths from a zod error, deduped and capped. `issue.path` only — `issue.message` embeds the
+ * offending VALUE, which for these schemas can be a clipboard preview, so it must never be logged.
+ */
+const issuePaths = (e: z.ZodError): readonly string[] =>
+  [...new Set(e.issues.map((i) => i.path.join('.') || '(root)'))].slice(0, 12)
+
 export function registerIpcHandlers(deps: IpcDeps): Unsub {
   for (const channel of IPC_REQUEST_CHANNELS) {
     // The indexed access is a union of schema types; one local widening keeps every call site clean.
@@ -128,7 +138,7 @@ export function registerIpcHandlers(deps: IpcDeps): Unsub {
     deps.ipcMain.handle(channel, async (_event, raw) => {
       const parsedParams = schemas.params.safeParse(raw)
       if (!parsedParams.success) {
-        deps.logger.warn('ipc.rejected', { code: 'E_IPC_REJECTED' })
+        deps.logger.warn('ipc.rejected', { code: 'E_IPC_REJECTED', paths: issuePaths(parsedParams.error) })
         return err('E_IPC_REJECTED', z.prettifyError(parsedParams.error))
       }
 
@@ -145,9 +155,14 @@ export function registerIpcHandlers(deps: IpcDeps): Unsub {
 
       const parsedResult = schemas.result.safeParse(outcome.value)
       if (!parsedResult.success) {
-        deps.logger.error('ipc.rejected', { code: 'E_INTERNAL' })
+        deps.logger.error('ipc.rejected', { code: 'E_INTERNAL', paths: issuePaths(parsedResult.error) })
         return err('E_INTERNAL', 'the handler returned a shape the contract does not allow')
       }
+      // Debug, and a COUNT only. This is the line that distinguishes "list returned nothing" from
+      // "list was never called", which no amount of staring at a log without it could settle.
+      const served = parsedResult.data
+      const items = isRecord(served) ? served['items'] : undefined
+      deps.logger.debug('ipc.served', Array.isArray(items) ? { count: items.length } : {})
       return ok(parsedResult.data)
     })
   }

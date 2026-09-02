@@ -24,7 +24,10 @@ export const LOG_EVENTS = [
   'renderer.navigation-blocked', 'renderer.permission-denied',
   'preview-cache.evicted-lock', 'preview-cache.evicted-suspend', 'preview-cache.evicted-idle',
   'config.loaded-default', 'config.saved',
-  'ipc.rejected', 'recall.copied', 'app.ready', 'app.quitting',
+  // `ipc.served` is debug-level and carries a count, never a value. Without it, the ABSENCE of an
+  // `ipc.rejected` line is ambiguous between "the call succeeded" and "the renderer never made the
+  // call at all" — which is exactly what made an empty palette impossible to diagnose from a log.
+  'ipc.rejected', 'ipc.served', 'recall.copied', 'app.ready', 'app.quitting',
 ] as const
 export type LogEvent = (typeof LOG_EVENTS)[number]
 
@@ -55,6 +58,15 @@ export interface LogFields {
   readonly accelerator?: string
   readonly ok?: boolean
   readonly attempt?: number
+  /**
+   * ZOD ISSUE PATHS ONLY, e.g. `['items.3.preview']`. Field NAMES from a schema, which are source
+   * constants, plus array indices. It exists because `ipc.rejected` previously carried only a code,
+   * so a contract mismatch said "the handler returned a shape the contract does not allow" without
+   * saying which field — undiagnosable from a user's log.
+   * NEVER assign a parsed value, an error `message`, or anything derived from clipboard bytes: zod
+   * puts the offending VALUE in `issue.message`, so pass `issue.path`, never the issue.
+   */
+  readonly paths?: readonly string[]
 }
 
 /** Collapses every key not in LogFields to `never`, so an extra key is a compile error. */
