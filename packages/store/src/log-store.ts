@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, ftruncateSync, openSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, ftruncateSync, openSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import {
   err,
   ok,
@@ -43,18 +43,34 @@ export interface StoreStats {
   readonly tornLineRepairedOnOpen: boolean
 }
 
+export interface CompactSummary {
+  readonly liveItemCount: number
+  readonly linesBefore: number
+  readonly linesAfter: number
+  readonly blobsRemoved: number
+  readonly maxSeq: number
+}
+
+/** Test-only seams: the only way to prove crash-safety without actually killing a process. */
+export interface UnsafeTestHooks {
+  readonly onBeforeRename?: () => void
+  readonly onAfterRename?: () => void
+}
+
 export interface OpenStoreOptions {
   readonly dir: string
   /** Exactly 32 bytes. Owned by @cairn/keyring; the store never reads a key from disk. */
   readonly key: Buffer
   readonly clock: Clock
   readonly logger: Logger
+  readonly unsafeTestHooks?: UnsafeTestHooks
 }
 
 export interface Store {
   appendEvent(input: StoreEventInput): Result<StoreEvent>
   readAll(): AsyncIterable<Result<StoreEvent>>
   checkpoint(liveItemCount: number): Result<StoreEvent>
+  compact(liveIds: readonly ItemId[]): Result<CompactSummary>
   putBlob(bytes: Uint8Array): Result<BlobId>
   getBlob(id: BlobId): Result<Buffer>
   deleteBlob(id: BlobId): Result<boolean>
@@ -338,6 +354,113 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
     putBlob: (bytes) => blobs.put(bytes),
     getBlob: (id) => blobs.get(id),
     deleteBlob: (id) => blobs.remove(id),
+
+    compact(liveIds) {
+      // 1. Replay the log to current state, refusing to launder a tampered one.
+      const live = new Map<ItemId, Item>()
+      const lines = readLines()
+      const chain = createChainVerifier()
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        if (line === undefined) break
+        const opened = openRecordAnyKind({
+          key: opts.key,
+          lineIndex: i,
+          seq: i === 0 ? ANCHOR_AAD_SEQ : anchorSeq + i,
+          line,
+        })
+        if (!opened.ok) return opened
+        const payload = decodePayload(opened.value.payload, i)
+        if (!payload.ok) return payload
+        const linked = chain.check(i, line, payload.value.prev)
+        if (!linked.ok) return linked
+        const event = toStoreEvent(payload.value, i)
+        if (!event.ok) return event
+        if (event.value.kind === 'ITEM_ADDED') live.set(event.value.item.id, event.value.item)
+        else if (event.value.kind === 'ITEM_UPDATED') {
+          const current = live.get(event.value.id)
+          if (current !== undefined) live.set(event.value.id, { ...current, ...event.value.patch })
+        } else if (event.value.kind === 'ITEM_DELETED') live.delete(event.value.id)
+      }
+
+      // A deleted id asked for by the caller stays deleted: compaction never resurrects.
+      const keep: Item[] = []
+      for (const id of liveIds) {
+        const item = live.get(id)
+        if (item !== undefined) keep.push(item)
+      }
+
+      // 2. Build the whole new generation in memory. Seq continues above the old maxSeq, so no
+      //    seq is ever reused (spec §10).
+      const base = maxSeq() + 1
+      let tip: ContentHash = CHAIN_GENESIS
+      const out: string[] = []
+      const anchorLine = sealRecord({
+        key: opts.key,
+        lineIndex: 0,
+        seq: ANCHOR_AAD_SEQ,
+        kind: 'CHECKPOINT',
+        payload: encodePayload({
+          seq: base,
+          at: opts.clock.now(),
+          kind: 'CHECKPOINT',
+          prev: tip,
+          maxSeq: maxSeq(),
+          liveItemCount: keep.length,
+          watermarks: {},
+        }),
+      })
+      out.push(anchorLine)
+      tip = chainNext(tip, anchorLine)
+      keep.forEach((item, idx) => {
+        const seq = base + idx + 1
+        const line = sealRecord({
+          key: opts.key,
+          lineIndex: idx + 1,
+          seq,
+          kind: 'ITEM_ADDED',
+          payload: encodePayload({ seq, at: opts.clock.now(), kind: 'ITEM_ADDED', prev: tip, item }),
+        })
+        out.push(line)
+        tip = chainNext(tip, line)
+      })
+
+      // 3. Temp file + fsync + rename + fsync dir. A crash anywhere before the rename leaves the
+      //    OLD log byte-for-byte intact.
+      const linesBefore = lineCount
+      try {
+        writeFile0600(L.tmpLogPath, `${out.join('\n')}\n`)
+        fsyncPath(L.tmpLogPath)
+        opts.unsafeTestHooks?.onBeforeRename?.()
+        renameSync(L.tmpLogPath, L.logPath)
+        fsyncPath(L.dir)
+      } catch (cause) {
+        return err('E_STORE_IO', `compact failed before rename: ${(cause as Error).message}`)
+      }
+      anchorSeq = base
+      lineCount = out.length
+      tipHash = tip
+      opts.unsafeTestHooks?.onAfterRename?.()
+
+      // 4. Only now GC blobs. A crash here leaks an orphan; it can never orphan a reference.
+      const keepFiles = new Set<string>()
+      for (const item of keep) {
+        for (const ref of item.repRefs) keepFiles.add(blobs.fileFor(ref.blobId))
+        if (item.thumbnailBlobId !== null) keepFiles.add(blobs.fileFor(item.thumbnailBlobId))
+      }
+      let blobsRemoved = 0
+      for (const file of blobs.files()) {
+        if (keepFiles.has(file)) continue
+        try {
+          unlinkSync(file)
+          blobsRemoved += 1
+        } catch (cause) {
+          return err('E_STORE_IO', `orphan blob GC failed: ${(cause as Error).message}`)
+        }
+      }
+      opts.logger.info('store.compacted', { count: keep.length, seq: maxSeq() })
+      return ok({ liveItemCount: keep.length, linesBefore, linesAfter: out.length, blobsRemoved, maxSeq: maxSeq() })
+    },
     stat() {
       return ok({
         lineCount,
