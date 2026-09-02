@@ -8,6 +8,35 @@ Effort: **S** ≈ a day · **M** ≈ a few days · **L** ≈ a week or two · **
 
 ---
 
+## Known gaps in v1
+
+These are not "future features" — they are places where v1 is less than it appears. Listed first
+because they are corrections, not additions.
+
+### Retention is configured but never enforced — S
+`config.json` accepts `retention.maxItems`, `maxAgeMs` and `maxBytes`, and `planEviction()` in
+`packages/history/src/retention.ts` implements all three correctly, with pins exempt. But the only
+caller is `history.evictNow()`, and **nothing calls that** — not on ingest, not on a timer, not at
+startup. So history grows without bound and the three settings have no effect.
+
+The security-relevant half: a masked secret disappears from the palette at its 5-minute TTL because
+`list()` filters on `isLive()` at read time, but its encrypted record and blob stay on disk, because
+that removal is eviction's job too. Wiring is small — call `evictNow()` at startup and after each
+ingest — and `retention.test.ts` already covers the policy itself.
+
+### No settings UI — M
+Every setting lives in `~/Library/Application Support/Cairn/config.json`, is read once at startup,
+and needs a relaunch. Worse, an invalid or incomplete file is rejected **whole**, silently falling
+back to every default, with only a `config.loaded-default` log line to say so — so a hand-edit that
+looks reasonable can quietly change nothing.
+
+Wants: a panel for the hotkey and the three retention limits, validation shown in the UI rather than
+in a log, live application without a restart, and a visible reason when a file is rejected.
+`hotkeyFailedText()` in the renderer already tells users "rebinding lives in Settings, which this
+build does not have yet".
+
+---
+
 ## Highest value first
 
 ### Snippets and templates — M

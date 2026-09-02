@@ -139,3 +139,26 @@ designated requirement and falls back to path+cdhash when unsigned, and `CGEvent
 *silently* when untrusted — so M2's required default assumption is `AXIsProcessTrusted() == false`
 with `deliver()` returning `{result:'copied-manual', reason:'no-permission'}`. This spike decides only
 *where M2 points the user*, never whether the app works.
+
+## Electron 44.1.1 shell facts, measured on macOS 26.5.1 arm64
+
+| Fact | Result |
+|---|---|
+| `BrowserWindow{type:'panel', vibrancy:'hud', visualEffectState:'active', transparent, frame:false}` | creates without error; `setAlwaysOnTop(true,'screen-saver')` → `isAlwaysOnTop() === true`; `setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true,skipTransformProcessType:true})` → `isVisibleOnAllWorkspaces() === true` |
+| `app.setName()` **after** `app.requestSingleInstanceLock()` | `app.name === 'Cairn'` but `userData` stays `~/Library/Application Support/Electron`. Order is load-bearing. |
+| second launch | `requestSingleInstanceLock() === false`; the first process receives `second-instance` |
+| default application menu | present on macOS with an Edit submenu already containing `cut/copy/paste/selectall`, so a missing custom menu is invisible until `setApplicationMenu(null)` |
+| `MenuItem.role` for `{role:'selectAll'}` | reads back **lowercased** as `'selectall'`; auto-accelerators are `CommandOrControl+A/C/V` |
+| strict CSP on a `file://` load | `script-src 'self'` runs an external module script; `style-src 'self'` applies an external stylesheet; injected inline `<script>` blocked; `new Function` → `EvalError`; `fetch()` → blocked by `connect-src 'none'`; `img-src 'self' data:` loads a data URL |
+| `devTools: false` | `openDevTools()` is refused, `isDevToolsOpened()` stays `false`, no throw |
+| `will-navigate` vs `will-frame-navigate` | a renderer-initiated `location.href = …` fires **`will-frame-navigate` only** when that handler calls `preventDefault()`. Guard all three events. |
+| `webContents.loadURL()` from main | does **not** fire `will-navigate`. Only our own code calls it, and `resolvePaletteEntry` is what keeps it pointed at a local file. |
+| `webContents.getLastWebPreferences()` | omits `devTools` and `spellcheck`, so the hardened set is asserted against the exported constant, not read back off the window |
+| `safeStorage.isEncryptionAvailable()` after `whenReady()` | `true`; `typeof safeStorage.getSelectedStorageBackend === 'undefined'` |
+| `powerMonitor` | `lock-screen`, `unlock-screen`, `suspend`, `resume` all attach. Electron maps them to `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` and `NSWorkspaceWillSleepNotification` / `NSWorkspaceDidWakeNotification`. `getSystemIdleTime()` is in **seconds**. |
+| `ipcMain.handle` twice on one channel | throws `Attempted to register a second handler for '<channel>'` |
+| `LSUIElement` | M1 has no bundle, so the Dock icon is hidden with `app.dock.hide()`. `LSUIElement: 1` goes into the Info.plist at M3 packaging. |
+
+**Day-0 spike (b), TCC attribution of an Accessibility request:** not exercised in M1 — M1 asks for
+**no** permission at all (NSPasteboard reads, NSWorkspace attribution and Carbon hotkeys are all
+permission-free). Record the answer when M2 first calls `AXIsProcessTrustedWithOptions`.

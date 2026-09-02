@@ -8,6 +8,9 @@ on:
 jobs:
   verify:
     runs-on: macos-15
+    # The whole job takes a couple of minutes. Without this, GitHub's default is SIX HOURS, so the
+    # first genuinely stuck run burns an afternoon of macOS runner minutes before anyone sees it.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,6 +22,13 @@ jobs:
         run: npm run guard:no-rebuild
       - name: Fetch the Electron binary (the one audited install step)
         run: npm run bootstrap
+      - name: Build the macOS agent
+        # Its own step for two reasons. It is the first swiftc invocation on a fresh runner, which
+        # builds the AppKit and Carbon modules from scratch — minutes of work that, folded into
+        # `npm test`, appears as a test suite mysteriously stalled with no output. And it warms the
+        # module cache, so tools/agent-selftest.test.ts compiles quickly instead of paying that cost
+        # inside a blocking execFileSync.
+        run: npm run agent:macos
       - name: Typecheck
         run: npm run typecheck
       - name: Tests
@@ -27,7 +37,22 @@ jobs:
         # silently skip whatever nobody remembered to name, and a skipped security project is an
         # unenforced control. Do not split this back into `npm run test:unit` + `npm run
         # test:security`: that is precisely how the renderer project would go unrun.
-        run: npm test
+        timeout-minutes: 12
+        # Every file reports ✓ and then the job sits there with no summary, so the run finishes and
+        # something keeps the process alive in teardown. It does not reproduce locally, CI=true
+        # included, so the wrapper looks while it is stuck: process tree, open files, and a `sample`
+        # stack for each surviving vitest pid.
+        #
+        # This replaced a shell watchdog that added a SECOND hang: killing the watchdog subshell does
+        # not kill the `sleep` inside it, and that orphaned `sleep` holds the step's stdout open, so
+        # GitHub waits on the pipe even when the tests are fine. The Node wrapper clears its timer and
+        # exits explicitly, so nothing outlives it.
+        #
+        # `--reporter=hanging-process` is vitest's own tool for exactly this: it lists the handles
+        # keeping the process alive when it cannot exit. Paired with the default reporter so test
+        # results stay visible. It is resource-intensive and documented as debugging-only, so it comes
+        # back out once this is understood. Verified silent locally, where the suite does exit.
+        run: node scripts/run-tests-ci.mjs --reporter=default --reporter=hanging-process
       - name: Committed transcripts are synthetic
         # `tools/record-transcript.ts` writes real clipboard bytes, so a committed transcript may
         # never be trusted. Fail loudly if transcripts exist without the scanner: a missing security

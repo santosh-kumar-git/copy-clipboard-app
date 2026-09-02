@@ -69,11 +69,40 @@ Requires Node 24 (see `.nvmrc`) and, on macOS, Xcode Command Line Tools for `swi
 not needed.
 
 ```sh
-nvm use
+nvm use           # 24.20.0; every script refuses to run on anything older
 npm ci
+npm run app       # fetch Electron, build the agent + bundles, launch. The one command.
 npm test          # everything runs against fakes; no OS permissions needed
 # `npm run doctor` (platform capabilities and why anything is unavailable) lands in Milestone 2.
 ```
+
+`npm run app` is `bootstrap && build && start`; run those individually when you want one of them.
+Press **Cmd+Shift+V** once it is up. The window is an accessory panel, so it never appears in the
+Dock or the app switcher, and the app logs one NDJSON line per event to stdout — `hotkey.bound` at
+startup and `hotkey.fired` on each press are the two to look for.
+
+## Settings
+
+There is no settings UI yet. Configuration is one file, read once at startup — relaunch to apply:
+
+```
+~/Library/Application Support/Cairn/config.json
+```
+
+```json
+{ "version": 1, "accelerator": "Cmd+Shift+V", "firstRunHotkeyDone": true,
+  "retention": { "maxItems": 500, "maxAgeMs": 2592000000, "maxBytes": 536870912 } }
+```
+
+`maxItems` 1–5000 · `maxAgeMs` ≥ 60000 (default 30 days) · `maxBytes` ≥ 1048576 (default 512 MiB).
+
+Two things to know before editing it:
+
+- **The file is validated as a whole.** One bad or missing field rejects all of it and every default
+  is used instead, with only a `config.loaded-default` line on stdout to say so. Keep every field.
+- **The three retention limits currently do nothing.** The policy is implemented and tested, but
+  nothing calls the eviction that applies it, so history grows without bound and expired secrets stay
+  on disk after they vanish from the palette. See "Known gaps in v1" in `ROADMAP.md`.
 
 ## Distribution
 
