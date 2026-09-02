@@ -308,6 +308,21 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
     layout: () => L,
     readAll,
     appendEvent(input) {
+      // A record may only reference blobs that are already fsync'd on disk (spec §4). The
+      // reverse ordering — event first — would make a crash produce an item that can never be
+      // recalled, and the store is where that ordering is enforced, not in a caller's comment.
+      if (input.kind === 'ITEM_ADDED') {
+        const referenced: BlobId[] = input.item.repRefs.map((r) => r.blobId)
+        if (input.item.thumbnailBlobId !== null) referenced.push(input.item.thumbnailBlobId)
+        const missing = referenced.filter((id) => !blobs.has(id))
+        if (missing.length > 0) {
+          return err(
+            'E_BLOB_MISSING',
+            `refusing to append: ${missing.length} referenced blob(s) are not on disk`,
+          )
+        }
+      }
+
       const extra =
         input.kind === 'ITEM_ADDED'
           ? { item: input.item }
