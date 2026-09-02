@@ -422,11 +422,25 @@ it('has no temp-file or file-write identifier anywhere in the package source', (
 })
 })
 
-/** Every file under `root`, two directory levels deep, skipping anything unreadable. */
+/**
+ * Every REGULAR file under `root`, two directory levels deep, skipping anything unreadable.
+ *
+ * `isFile()` is load-bearing, not tidiness. This previously returned every non-directory entry,
+ * which includes FIFOs, sockets and device nodes. Opening a FIFO that has no writer BLOCKS
+ * FOREVER — it is not an error, so the caller's try/catch never sees it — and because
+ * `readFileSync` is a synchronous syscall on the worker thread, vitest's per-test timeout cannot
+ * interrupt it either.
+ *
+ * That is exactly what hung CI. A GitHub macOS runner's $TMPDIR contains FIFOs belonging to the
+ * Actions infrastructure; a developer Mac's typically does not, so it passed locally every time.
+ * The worker simply stopped reporting, so vitest believed tests were still running: no summary, no
+ * "Close timed out", and `--reporter=hanging-process` never fired because vitest never got as far
+ * as trying to exit. The stack said it plainly — uv_fs_open -> uv__fs_work -> open.
+ */
 function listFiles(root: string, depth = 2): string[] {
   const out: string[] = []
   const walk = (dir: string, d: number): void => {
-    let entries: { name: string; isDirectory(): boolean }[]
+    let entries: { name: string; isDirectory(): boolean; isFile(): boolean }[]
     try {
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
@@ -436,7 +450,9 @@ function listFiles(root: string, depth = 2): string[] {
       const p = join(dir, e.name)
       if (e.isDirectory()) {
         if (d > 0) walk(p, d - 1)
-      } else {
+      } else if (e.isFile()) {
+        // Regular files only. A symlink reports false here too, which is deliberate: following one
+        // can land on a FIFO just as easily, and a leaked payload file would be a regular file.
         out.push(p)
       }
     }

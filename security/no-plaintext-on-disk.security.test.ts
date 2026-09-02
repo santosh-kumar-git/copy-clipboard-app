@@ -8,7 +8,8 @@
  * deliberately outside those globs, which is why this file spells the banned identifiers out in
  * full instead of assembling them from fragments.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, relative, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -42,7 +43,14 @@ afterEach(() => {
  *  `sourceFiles`, which prunes more and is shared with every other source ban. */
 function walk(p: string): string[] {
   if (!existsSync(p)) return []
-  if (!statSync(p).isDirectory()) return [p]
+  // `lstatSync`, and REGULAR files only. Every caller below opens what this returns, and opening a
+  // FIFO with no writer blocks forever — not an error, so no try/catch helps, and the block is a
+  // synchronous syscall so no test timeout can interrupt it. The same shape hung CI from
+  // packages/agent-host/src/spawn-agent.test.ts, whose walker scanned $TMPDIR on a runner whose
+  // temp directory contains Actions' own FIFOs. This walker only sees directories we create, so it
+  // was not the one that hung — it is hardened because it is one `walk(otherDir)` away from being.
+  const st = lstatSync(p)
+  if (!st.isDirectory()) return st.isFile() ? [p] : []
   return readdirSync(p)
     .filter((f) => f !== 'node_modules')
     .flatMap((f) => walk(join(p, f)))
@@ -143,6 +151,32 @@ describe('no plaintext clipboard bytes on disk (spec §11 control 1, contract §
     expect(previews.some((p) => p.includes(TEST_CANARY))).toBe(true)
     const body = store.getBlob(blobId)
     expect(body.ok && body.value.toString('utf8')).toBe(candidate.primaryText)
+  })
+
+  // The bug that hung CI, pinned here because it is a property of the WALKER, not of the store.
+  // `packages/agent-host/src/spawn-agent.test.ts` walked $TMPDIR and opened every non-directory it
+  // found. A GitHub macOS runner's temp directory contains FIFOs belonging to the Actions
+  // infrastructure; `open()` on a FIFO with no writer never returns. It is not an error, so the
+  // try/catch around it never fired, and it is a synchronous syscall, so vitest's per-test timeout
+  // could not interrupt it. The worker stopped reporting, vitest kept believing tests were running,
+  // and the job hung with no summary and no failure. Local temp directories have no FIFOs, so every
+  // local run passed.
+  it('skips a FIFO instead of blocking forever in open() — the bug that hung CI', () => {
+    const { dir, cleanup } = tempStoreDir()
+    cleanups.push(cleanup)
+    const regular = join(dir, 'regular.txt')
+    writeFileSync(regular, 'plain text')
+    const fifo = join(dir, 'a-fifo')
+    execFileSync('/usr/bin/mkfifo', [fifo])
+    expect(lstatSync(fifo).isFIFO(), 'the fixture must really be a FIFO').toBe(true)
+
+    const files = walk(dir)
+    expect(files).toContain(regular)
+    // Asserted BEFORE the read loop on purpose: if this regresses it must fail fast, not hang.
+    expect(files, 'a FIFO must never reach a readFileSync').not.toContain(fifo)
+
+    // The property that actually matters: reading everything the walker returns terminates.
+    for (const f of files) readFileSync(f)
   })
 
   it('the scanner itself works: a plaintext file in the same tree IS found', () => {
