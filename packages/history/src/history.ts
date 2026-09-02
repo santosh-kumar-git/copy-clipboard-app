@@ -29,7 +29,6 @@ import { bumpUpdatedAt, indexByContentHash } from './dedupe'
 import { DEFAULT_RETENTION, planEviction, type Eviction, type RetentionLimits } from './retention'
 import type { SearchIndex } from '@cairn/search'
 import type { Store } from '@cairn/store'
-import { DEFAULT_RETENTION, type RetentionLimits } from './retention'
 
 /** Injected rather than imported, so every history test can run without a real detector table. */
 export interface PrivacyPort {
