@@ -174,7 +174,7 @@ export function sendIpcEvent(
   const schema = IpcEventSchema[channel] as unknown as z.ZodType
   const parsed = schema.safeParse(payload)
   if (!parsed.success) {
-    logger.error('ipc.rejected', { event: undefined, code: 'E_IPC_REJECTED' })
+    logger.error('ipc.rejected', { code: 'E_IPC_REJECTED' })
     return false
   }
   target.send(channel, parsed.data)
