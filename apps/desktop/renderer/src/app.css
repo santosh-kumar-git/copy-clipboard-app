@@ -97,6 +97,13 @@ body {
   text-overflow: ellipsis;
 }
 
+/* The no-text-preview case: an image, or files with no readable path. Dimmed so it reads as a
+   description of the row rather than as its contents. */
+.row-preview-fallback {
+  opacity: 0.62;
+  font-style: italic;
+}
+
 .chip {
   flex: none;
   font-size: 10px;

@@ -28,7 +28,9 @@
     "build": "node scripts/check-node.mjs && npm run guard:no-rebuild && npm run agent:macos && electron-vite build",
     "start": "node scripts/check-node.mjs && electron apps/desktop",
     "dev": "node scripts/check-node.mjs && npm run agent:macos && electron-vite dev",
-    "verify": "npm run guard:no-rebuild && npm run typecheck && npm run test && npm run scan:transcripts"
+    "verify": "npm run guard:no-rebuild && npm run typecheck && npm run test && npm run scan:transcripts",
+    "icon:tray": "node scripts/gen-tray-icon.mjs",
+    "package:mac": "node scripts/check-node.mjs && npm run build && node scripts/package-macos.mjs"
   },
   "devDependencies": {
     "@leeoniya/ufuzzy": "1.0.19",

@@ -44,6 +44,8 @@ function build(over: {
   reps?: readonly ResolvedRep[]
   keyringMode?: KeyringMode
   keyringWarning?: string
+  previewsEvicted?: boolean
+  reloadedItems?: number
 } = {}) {
   const clock = createTestClock()
   const agentRequests: { method: string; params: unknown }[] = []
@@ -90,8 +92,12 @@ function build(over: {
   const ingested: Candidate[] = []
   const changeCbs: ((e: { reason: string; total: number }) => void)[] = []
   let previewCacheEvictions = 0
+  // Mirrors the real history: eviction blanks previews and only load() brings them back. The fake
+  // has to model that, because the palette-open path now depends on it.
+  let previewsEvicted = over.previewsEvicted ?? false
+  let loads = 0
   const history = {
-    load: async () => ok({ items: 0 }),
+    load: async () => { loads += 1; previewsEvicted = false; return ok({ items: over.reloadedItems ?? 0 }) },
     ingest: async (c: Candidate) => { ingested.push(c); return ok({ outcome: 'added' as const, item: {} as Item }) },
     list: () => ({ items: [] as readonly Item[], total: 0 }),
     search: () => [],
@@ -99,7 +105,8 @@ function build(over: {
     pin: async () => ok({ pinned: true }),
     remove: async () => ok({ removed: true }),
     evictNow: async () => ok({ evicted: 0 }),
-    evictPreviewCache: () => { previewCacheEvictions += 1 },
+    evictPreviewCache: () => { previewCacheEvictions += 1; previewsEvicted = true },
+    previewsEvicted: () => previewsEvicted,
     get: () => undefined,
     onChange: (cb: (e: { reason: string; total: number }) => void): Unsub => { changeCbs.push(cb); return () => {} },
   } as unknown as History
@@ -167,6 +174,8 @@ function build(over: {
     fireHotkey: () => { for (const l of hotkeyListeners) l({ accelerator: 'Cmd+Shift+V', focusToken: 'tok', firedAt: 1 }) },
     setIdle: (s: number) => { idleSeconds = s },
     get keyringLocked() { return keyringLocked },
+    get historyLoads() { return loads },
+    get previewsEvicted() { return previewsEvicted },
     get storeCloses() { return storeCloses },
     get previewCacheEvictions() { return previewCacheEvictions },
   }
@@ -261,6 +270,66 @@ describe('the hotkey → palette path', () => {
     h.fireHotkey()
     h.fireHotkey()
     expect(h.paletteCalls).toEqual(['show', 'hide'])
+  })
+})
+
+describe('previews come back after the preview cache is evicted', () => {
+  // The reported bug: "yesterday's copies are not visible". The boundary was not the date, it was
+  // the machine going to sleep. Spec §11 control 6 evicts every decrypted preview on sleep, lock and
+  // five minutes idle, and evictPreviewCache() blanks them "until load() re-reads the encrypted
+  // store" — but nothing called load() again. Rows rendered with empty previews and search() answered
+  // NOTHING, until the app was restarted.
+  it('re-reads the store when the palette opens with previews evicted', async () => {
+    const h = build({ previewsEvicted: true, reloadedItems: 42 })
+    await h.app.start()
+    const loadsAfterStart = h.historyLoads
+
+    h.app.togglePalette()
+    // Waiting on the EVENT, not on the flag: the event is the observable contract, and it must land
+    // after the reload. Waiting on the flag alone passes one microtask too early.
+    await vi.waitFor(() => { expect(h.sent.map(([c]) => c)).toContain('cairn:palette.shown') })
+
+    expect(h.previewsEvicted).toBe(false)
+    expect(h.historyLoads, 'exactly one reload, not one per open').toBe(loadsAfterStart + 1)
+  })
+
+  it('does NOT re-read on every open — only when previews are actually evicted', async () => {
+    const h = build()
+    await h.app.start()
+    const before = h.historyLoads
+    h.app.togglePalette()
+    expect(h.historyLoads).toBe(before)
+    expect(h.sent.map(([c]) => c)).toContain('cairn:palette.shown')
+  })
+
+  it('restores previews on wake, mirroring the suspend that dropped them', async () => {
+    const h = build()
+    await h.app.start()
+    h.powerHandlers.get('suspend')?.()
+    expect(h.previewsEvicted).toBe(true)
+    h.powerHandlers.get('resume')?.()
+    await vi.waitFor(() => { expect(h.previewsEvicted).toBe(false) })
+  })
+
+  it('restores previews on unlock, mirroring the lock that dropped them', async () => {
+    const h = build()
+    await h.app.start()
+    h.powerHandlers.get('lock-screen')?.()
+    expect(h.previewsEvicted).toBe(true)
+    h.powerHandlers.get('unlock-screen')?.()
+    await vi.waitFor(() => { expect(h.previewsEvicted).toBe(false) })
+  })
+
+  it('does NOT try to decrypt after a passphrase-mode relock, where the key is gone', async () => {
+    // In passphrase mode a screen lock also zero-fills the key, so load() could only fail. The user
+    // has already been told why by the relock banner; a failed decrypt on top would be noise.
+    const h = build({ keyringMode: 'passphrase' })
+    await h.app.start()
+    h.powerHandlers.get('lock-screen')?.()
+    const before = h.historyLoads
+    h.app.togglePalette()
+    expect(h.historyLoads).toBe(before)
+    expect(h.previewsEvicted).toBe(true)
   })
 })
 

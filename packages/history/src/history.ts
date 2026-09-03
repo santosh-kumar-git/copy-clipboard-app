@@ -72,6 +72,12 @@ export interface History {
   remove(id: ItemId): Promise<Result<{ removed: boolean }>>
   evictNow(): Promise<Result<{ evicted: number }>>
   evictPreviewCache(): void
+  /**
+   * True after `evictPreviewCache()` until the next `load()`. Callers need this because eviction is
+   * NOT self-healing: previews are blanked and `search()` answers nothing until the encrypted store
+   * is re-read, and `list()` is synchronous so it cannot re-read on its own.
+   */
+  previewsEvicted(): boolean
   get(id: ItemId): Item | undefined
   onChange(cb: (e: { reason: ChangeReason; total: number }) => void): Unsub
 }
@@ -368,6 +374,10 @@ export function createHistory(deps: HistoryDeps): History {
       // JavaScript cannot zero a string, so the honest control is to drop every reference and stop
       // answering searches until load() re-reads the encrypted store.
       for (const [id, it] of items) items.set(id, { ...it, preview: '', maskSpans: [] })
+    },
+
+    previewsEvicted() {
+      return !previewsLoaded
     },
 
     get(id) {

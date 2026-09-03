@@ -81,6 +81,26 @@ Press **Cmd+Shift+V** once it is up. The window is an accessory panel, so it nev
 Dock or the app switcher, and the app logs one NDJSON line per event to stdout — `hotkey.bound` at
 startup and `hotkey.fired` on each press are the two to look for.
 
+## Install it (macOS, local)
+
+```sh
+npm run package:mac      # builds dist/Cairn.app (~300 MB, most of it Electron)
+open dist                # then drag Cairn.app to /Applications
+```
+
+**First launch must be right-click → Open**, once. The bundle is unsigned and not notarized, so
+double-clicking gets "Cairn is damaged or can't be opened" — that is Gatekeeper refusing an unsigned
+app, not a broken build. After the first Open, it launches normally forever.
+
+Cairn has no Dock icon and no window (`LSUIElement`). It lives in the **menu bar** as three stacked
+stones:
+
+- **Left click** — opens the history. Click again to dismiss.
+- **Right click** — Open / Quit.
+- **Cmd+Shift+V** — same as left click, from anywhere.
+
+Signing, notarization, a DMG, a login item and auto-update are Milestone 3.
+
 ## Settings
 
 There is no settings UI yet. Configuration is one file, read once at startup — relaunch to apply:

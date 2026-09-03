@@ -115,6 +115,29 @@ export function filePathsFromPreview(preview: string): string[] {
     })
 }
 
+/**
+ * What a row shows when it has no text preview. An image legitimately has none, so those rows
+ * rendered completely blank — a badge and empty space, indistinguishable from the bug where the
+ * preview cache had been evicted. Describing the item instead means a blank row always means
+ * something is wrong, rather than sometimes being normal.
+ */
+export function rowFallbackLabel(item: { kind: ItemKind; byteLength: number }): string {
+  return `${kindChipLabel(item.kind)} · ${formatBytes(item.byteLength)}`
+}
+
+/** Binary-ish but rounded for humans: 1 decimal place under 10 units, none above. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+
 export function kindChipLabel(kind: ItemKind): string {
   switch (kind) {
     case 'text':
