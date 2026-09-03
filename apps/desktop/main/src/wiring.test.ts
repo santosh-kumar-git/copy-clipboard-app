@@ -44,6 +44,8 @@ function build(over: {
   reps?: readonly ResolvedRep[]
   keyringMode?: KeyringMode
   keyringWarning?: string
+  evictedPerSweep?: number
+  failEviction?: boolean
   previewsEvicted?: boolean
   reloadedItems?: number
 } = {}) {
@@ -92,6 +94,8 @@ function build(over: {
   const ingested: Candidate[] = []
   const changeCbs: ((e: { reason: string; total: number }) => void)[] = []
   let previewCacheEvictions = 0
+  let evictNowCalls = 0
+  let maxItemsSet: number[] = []
   // Mirrors the real history: eviction blanks previews and only load() brings them back. The fake
   // has to model that, because the palette-open path now depends on it.
   let previewsEvicted = over.previewsEvicted ?? false
@@ -104,8 +108,14 @@ function build(over: {
     resolveReps: async () => ok(over.reps ?? [rep('text/plain', 'hello world')]),
     pin: async () => ok({ pinned: true }),
     remove: async () => ok({ removed: true }),
-    evictNow: async () => ok({ evicted: 0 }),
+    evictNow: async () => {
+      evictNowCalls += 1
+      return over.failEviction === true
+        ? err('E_STORE_IO', 'disk full')
+        : ok({ evicted: over.evictedPerSweep ?? 0 })
+    },
     evictPreviewCache: () => { previewCacheEvictions += 1; previewsEvicted = true },
+    setMaxItems: (n: number) => { maxItemsSet.push(n) },
     previewsEvicted: () => previewsEvicted,
     get: () => undefined,
     onChange: (cb: (e: { reason: string; total: number }) => void): Unsub => { changeCbs.push(cb); return () => {} },
@@ -175,6 +185,8 @@ function build(over: {
     setIdle: (s: number) => { idleSeconds = s },
     get keyringLocked() { return keyringLocked },
     get historyLoads() { return loads },
+    get evictNowCalls() { return evictNowCalls },
+    get maxItemsSet() { return maxItemsSet },
     get previewsEvicted() { return previewsEvicted },
     get storeCloses() { return storeCloses },
     get previewCacheEvictions() { return previewCacheEvictions },
@@ -273,6 +285,65 @@ describe('the hotkey → palette path', () => {
   })
 })
 
+describe('the history limit is a real setting', () => {
+  // Before this, retention was configurable, validated — and completely inert. evictNow() had no
+  // caller anywhere, so history grew without bound whatever config.json said, and an expired secret's
+  // blob stayed on disk after the palette had stopped showing it.
+  it('enforces the limit at startup, so a limit lowered while closed applies immediately', async () => {
+    const h = build()
+    await h.app.start()
+    expect(h.evictNowCalls, 'startup must sweep once').toBeGreaterThanOrEqual(1)
+  })
+
+  it('enforces the limit on every ingest, the only moment the count can exceed it', async () => {
+    const h = build()
+    await h.app.start()
+    const before = h.evictNowCalls
+    for (const cb of h.candidateCbs) {
+      cb({
+        reps: [rep('text/plain', 'x')], kind: 'text', contentHash: HASH, primaryText: 'x',
+        hints: [], sourceApp: null, thumbnailJpeg: null, changeToken: 'c', capturedAt: 1,
+      })
+    }
+    await vi.waitFor(() => { expect(h.evictNowCalls).toBe(before + 1) })
+  })
+
+  it('persists a new limit, applies it at once, and tells the renderer', async () => {
+    const h = build()
+    await h.app.start()
+    const sweepsBefore = h.evictNowCalls
+
+    await h.app.setHistoryLimit(50)
+
+    expect(h.app.historyLimit()).toBe(50)
+    expect(h.maxItemsSet, 'history must be told, or the sweep uses the old limit').toEqual([50])
+    expect(h.saved.at(-1)?.retention.maxItems, 'and it must survive a relaunch').toBe(50)
+    expect(h.evictNowCalls, 'applied now, not at the next copy').toBe(sweepsBefore + 1)
+    expect(h.sent.map(([c]) => c)).toContain('cairn:history.changed')
+  })
+
+  it('reports the configured limit, not a hard-coded default', async () => {
+    const h = build()
+    await h.app.start()
+    expect(h.app.historyLimit()).toBe(500)
+    await h.app.setHistoryLimit(2_000)
+    expect(h.app.historyLimit()).toBe(2_000)
+  })
+
+  it('a failed sweep is logged and does not break the ingest that triggered it', async () => {
+    const h = build({ failEviction: true })
+    await h.app.start()
+    for (const cb of h.candidateCbs) {
+      cb({
+        reps: [rep('text/plain', 'y')], kind: 'text', contentHash: HASH, primaryText: 'y',
+        hints: [], sourceApp: null, thumbnailJpeg: null, changeToken: 'c2', capturedAt: 2,
+      })
+    }
+    // The item still lands and the renderer is still told; only the sweep failed.
+    await vi.waitFor(() => { expect(h.ingested).toHaveLength(1) })
+  })
+})
+
 describe('previews come back after the preview cache is evicted', () => {
   // The reported bug: "yesterday's copies are not visible". The boundary was not the date, it was
   // the machine going to sleep. Spec §11 control 6 evicts every decrypted preview on sleep, lock and
@@ -349,8 +420,12 @@ describe('the capture → history path', () => {
       capturedAt: 1_767_225_600_000,
     }
     for (const cb of h.candidateCbs) cb(candidate)
-    await vi.waitFor(() => expect(h.ingested).toHaveLength(1))
-    expect(h.sent.some(([c]) => c === 'cairn:history.changed')).toBe(true)
+    // Waiting on the EVENT, not on `ingested`: the event is now sent after retention is enforced,
+    // which is one more await away.
+    await vi.waitFor(() => {
+      expect(h.sent.some(([c]) => c === 'cairn:history.changed')).toBe(true)
+    })
+    expect(h.ingested).toHaveLength(1)
   })
 })
 

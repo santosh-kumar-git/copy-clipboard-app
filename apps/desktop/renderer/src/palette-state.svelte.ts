@@ -20,6 +20,21 @@ export const FETCH_SPAN = 32
 export const SEARCH_LIMIT = 50
 export const TOAST_MS = 2_000
 
+/**
+ * The shortcut hints. Pinning and deleting have worked from day one — Cmd+P and Cmd+Backspace — but
+ * nothing anywhere said so, so as far as anyone using the app was concerned the pin feature did not
+ * exist. A feature reachable only by reading the source is not shipped.
+ *
+ * `⌫` rather than "Backspace" because that is what is printed on the key.
+ */
+export const SHORTCUT_HINTS = [
+  { keys: '↑↓', label: 'navigate' },
+  { keys: '⏎', label: 'copy' },
+  { keys: '⌘P', label: 'pin' },
+  { keys: '⌘⌫', label: 'delete' },
+  { keys: 'esc', label: 'close' },
+] as const
+
 export const EMPTY_TEXT = 'Nothing copied yet'
 export const NO_RESULTS_TEXT = 'No matches'
 export const SECRET_PIN_REFUSED_TEXT = 'Secrets cannot be pinned — this one expires in 5 minutes'

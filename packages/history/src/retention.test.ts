@@ -8,7 +8,7 @@ import {
   type Item,
   type ItemId,
 } from '@cairn/protocol'
-import { isSyncableDelete, planEviction, SYNCABLE_DELETE_REASONS } from './retention'
+import { DEFAULT_RETENTION, isSyncableDelete, planEviction, SYNCABLE_DELETE_REASONS } from './retention'
 
 const HASH = ('sha256-' + 'a'.repeat(43)) as ContentHash
 /** 2026-01-01T00:00:00Z, the createTestClock default, so timestamps in failures are recognisable. */
@@ -62,17 +62,26 @@ describe('planEviction — the 500-item limit', () => {
 })
 
 describe('planEviction — the 30-day limit', () => {
-  it('evicts at exactly 30 days and keeps an item 1 ms younger', () => {
+  // maxAgeMs is opt-in and null by default, so these pass it explicitly. "Keep the last N items"
+  // must not also mean "and silently drop anything older than a month".
+  const AGED = { ...DEFAULT_RETENTION, maxAgeMs: RETENTION_MAX_AGE_MS }
+
+  it('evicts at exactly 30 days and keeps an item 1 ms younger, when age is configured', () => {
     const items = [
       item({ id: 'OLD', createdAt: NOW - RETENTION_MAX_AGE_MS }),
       item({ id: 'YOUNG', createdAt: NOW - RETENTION_MAX_AGE_MS + 1 }),
     ]
-    expect(planEviction(items, NOW)).toEqual([{ id: 'OLD', reason: 'retention-age' }])
+    expect(planEviction(items, NOW, AGED)).toEqual([{ id: 'OLD', reason: 'retention-age' }])
+  })
+
+  it('evicts NOTHING by age with the default limits, however old the item', () => {
+    const ancient = [item({ id: 'ANCIENT', createdAt: NOW - RETENTION_MAX_AGE_MS * 100 })]
+    expect(planEviction(ancient, NOW)).toEqual([])
   })
 
   it('pinned items are exempt from the age limit forever', () => {
     const items = [item({ id: 'OLD-PINNED', createdAt: NOW - RETENTION_MAX_AGE_MS * 100, pinned: true })]
-    expect(planEviction(items, NOW)).toEqual([])
+    expect(planEviction(items, NOW, AGED)).toEqual([])
   })
 })
 
@@ -121,7 +130,10 @@ describe('local eviction emits no tombstone that could ever replicate', () => {
     // Otherwise a phone with a smaller cap would delete items off the desktop (spec §4).
     const reasons = new Set([
       ...planEviction([item({ id: 'A', createdAt: NOW, expiresAt: NOW })], NOW).map((ev) => ev.reason),
-      ...planEviction([item({ id: 'B', createdAt: NOW - RETENTION_MAX_AGE_MS })], NOW).map((ev) => ev.reason),
+      ...planEviction([item({ id: 'B', createdAt: NOW - RETENTION_MAX_AGE_MS })], NOW, {
+        ...DEFAULT_RETENTION,
+        maxAgeMs: RETENTION_MAX_AGE_MS,
+      }).map((ev) => ev.reason),
       ...planEviction(
         Array.from({ length: RETENTION_MAX_ITEMS + 1 }, (_, i) => item({ id: `C${i}`, createdAt: NOW - i })),
         NOW,

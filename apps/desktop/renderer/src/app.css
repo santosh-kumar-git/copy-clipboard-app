@@ -185,3 +185,32 @@ mark {
 .toast[data-tone='warn'] {
   border-color: var(--cairn-hit);
 }
+
+
+/* The shortcut hint row. Pin and delete are keyboard-only, so this is the only place they are
+   discoverable; it is quiet enough to ignore and always present enough to find. */
+.hints {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 6px 12px;
+  border-top: 1px solid rgb(255 255 255 / 8%);
+  font-size: 11px;
+  opacity: 0.55;
+  user-select: none;
+}
+
+.hint {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.hints kbd {
+  padding: 1px 5px;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+}

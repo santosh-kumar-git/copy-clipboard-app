@@ -26,10 +26,20 @@ export interface NativeImageLike {
 
 export interface TrayMenuItem {
   readonly label?: string
-  readonly type?: 'separator'
+  readonly type?: 'separator' | 'submenu' | 'radio'
   readonly accelerator?: string
+  readonly checked?: boolean
+  readonly submenu?: readonly TrayMenuItem[]
   readonly click?: () => void
 }
+
+/**
+ * The choices offered for "how many copies to keep". Presets rather than a free-text field: this
+ * lives in a menu, a menu cannot validate typing, and the schema's real range is 1..5000. Anyone who
+ * wants 137 can still put it in config.json and it is honoured — the menu shows the closest preset as
+ * selected rather than pretending the value is invalid.
+ */
+export const HISTORY_LIMIT_CHOICES = [50, 100, 200, 500, 1_000, 2_000] as const
 
 export const TRAY_TOOLTIP = 'Cairn — clipboard history'
 
@@ -48,14 +58,36 @@ export function trayIconPath(resourcesDir: string): string {
  */
 export function trayMenuTemplate(deps: {
   accelerator: string
+  historyLimit: number
   onOpen: () => void
+  onSetHistoryLimit: (limit: number) => void
   onQuit: () => void
 }): readonly TrayMenuItem[] {
   return [
     { label: `Open Cairn   ${deps.accelerator}`, click: deps.onOpen },
     { type: 'separator' },
+    {
+      label: 'Keep the last…',
+      type: 'submenu',
+      submenu: HISTORY_LIMIT_CHOICES.map((n) => ({
+        label: `${n.toLocaleString('en-US')} copies`,
+        type: 'radio' as const,
+        // The CLOSEST preset is checked, not an exact match, so a hand-edited config.json still shows
+        // something sensible instead of a submenu with nothing selected.
+        checked: n === closestChoice(deps.historyLimit),
+        click: () => deps.onSetHistoryLimit(n),
+      })),
+    },
+    { type: 'separator' },
     { label: 'Quit Cairn', click: deps.onQuit },
   ]
+}
+
+/** The preset nearest `limit`; ties go to the smaller, because keeping less is the safer default. */
+export function closestChoice(limit: number): number {
+  return HISTORY_LIMIT_CHOICES.reduce((best, n) =>
+    Math.abs(n - limit) < Math.abs(best - limit) ? n : best,
+  )
 }
 
 export interface CreateTrayDeps {
@@ -63,7 +95,9 @@ export interface CreateTrayDeps {
   readonly makeTray: (icon: NativeImageLike) => TrayLike
   readonly buildMenu: (template: readonly TrayMenuItem[]) => unknown
   readonly accelerator: string
+  readonly historyLimit: () => number
   readonly onToggle: () => void
+  readonly onSetHistoryLimit: (limit: number) => void
   readonly onQuit: () => void
   readonly logger: Logger
 }
@@ -83,10 +117,21 @@ export function createTray(deps: CreateTrayDeps): TrayLike | null {
   // Without this a fast second click is swallowed as a double-click, so toggling feels broken.
   tray.setIgnoreDoubleClickEvents(true)
   tray.on('click', deps.onToggle)
-  const menu = deps.buildMenu(
-    trayMenuTemplate({ accelerator: deps.accelerator, onOpen: deps.onToggle, onQuit: deps.onQuit }),
-  )
-  tray.on('right-click', () => { tray.popUpContextMenu(menu) })
+  // The menu is rebuilt on every right-click rather than once, so the radio tick reflects the CURRENT
+  // limit. A menu built at startup would keep showing the value the app launched with.
+  tray.on('right-click', () => {
+    tray.popUpContextMenu(
+      deps.buildMenu(
+        trayMenuTemplate({
+          accelerator: deps.accelerator,
+          historyLimit: deps.historyLimit(),
+          onOpen: deps.onToggle,
+          onSetHistoryLimit: deps.onSetHistoryLimit,
+          onQuit: deps.onQuit,
+        }),
+      ),
+    )
+  })
   deps.logger.info('tray.ready')
   return tray
 }

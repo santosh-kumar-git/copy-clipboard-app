@@ -252,9 +252,12 @@ async function main(): Promise<void> {
   trayRef = createTray({
     icon: nativeImage.createFromPath(trayIconPath(RESOURCES_DIR)),
     makeTray: (icon) => new Tray(icon as Electron.NativeImage),
-    buildMenu: (template) => Menu.buildFromTemplate([...template] as Electron.MenuItemConstructorOptions[]),
+    buildMenu: (template) =>
+      Menu.buildFromTemplate([...template] as unknown as Electron.MenuItemConstructorOptions[]),
     accelerator: started.value.accelerator,
+    historyLimit: () => cairn.historyLimit(),
     onToggle: () => { cairn.togglePalette() },
+    onSetHistoryLimit: (limit) => { void cairn.setHistoryLimit(limit) },
     onQuit: () => { app.quit() },
     logger,
   })

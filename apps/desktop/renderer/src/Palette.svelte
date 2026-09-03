@@ -4,6 +4,7 @@
   import Toast from './Toast.svelte'
   import {
     EMPTY_TEXT,
+    SHORTCUT_HINTS,
     NO_RESULTS_TEXT,
     PaletteState,
     ROW_HEIGHT_PX,
@@ -148,6 +149,13 @@
 
   <div class="preview-pane">
     <Preview text={palette.previewText} mime={palette.previewMime} {filePaths} />
+  </div>
+
+  <!-- Pin and delete are keyboard-only, and were completely undiscoverable before this row. -->
+  <div class="hints" data-testid="hints">
+    {#each SHORTCUT_HINTS as hint (hint.keys)}
+      <span class="hint"><kbd>{hint.keys}</kbd> {hint.label}</span>
+    {/each}
   </div>
 
   {#if palette.toast !== null}
