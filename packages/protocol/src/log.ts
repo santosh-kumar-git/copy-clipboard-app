@@ -28,6 +28,7 @@ export const LOG_EVENTS = [
   // `ipc.rejected` line is ambiguous between "the call succeeded" and "the renderer never made the
   // call at all" — which is exactly what made an empty palette impossible to diagnose from a log.
   'ipc.rejected', 'ipc.served', 'recall.copied', 'app.ready', 'app.quitting',
+  'tray.ready', 'tray.icon-missing',
 ] as const
 export type LogEvent = (typeof LOG_EVENTS)[number]
 

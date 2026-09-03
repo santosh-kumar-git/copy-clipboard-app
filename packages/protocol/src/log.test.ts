@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { LOG_EVENTS, type LogEvent, type Logger } from './log'
 
 describe('LOG_EVENTS is the closed set of log message ids', () => {
-  it('holds 47 ids with no duplicates', () => {
-    expect(LOG_EVENTS).toHaveLength(47)
-    expect(new Set(LOG_EVENTS).size).toBe(47)
+  it('holds 49 ids with no duplicates', () => {
+    expect(LOG_EVENTS).toHaveLength(49)
+    expect(new Set(LOG_EVENTS).size).toBe(49)
   })
 
   it('every id is a dotted lowercase-kebab pair, so no sentence can ever be one', () => {
@@ -12,11 +12,11 @@ describe('LOG_EVENTS is the closed set of log message ids', () => {
     expect(LOG_EVENTS).not.toContain('the user copied CANARY-SECRET')
   })
 
-  it('covers exactly the fourteen subsystems that log in M1', () => {
+  it('covers exactly the fifteen subsystems that log in M1', () => {
     const prefixes = [...new Set(LOG_EVENTS.map((e) => e.split('.')[0]!))].sort()
     expect(prefixes).toEqual([
       'agent', 'app', 'capture', 'config', 'history', 'hotkey', 'ipc', 'keyring',
-      'preview-cache', 'privacy', 'recall', 'renderer', 'rep', 'store',
+      'preview-cache', 'privacy', 'recall', 'renderer', 'rep', 'store', 'tray',
     ])
   })
 
@@ -44,7 +44,7 @@ describe('LOG_EVENTS is the closed set of log message ids', () => {
       error: (e, f) => spy.log('error', e, f),
     }
     for (const e of LOG_EVENTS) spy.info(e, { ok: true })
-    expect(seen).toHaveLength(47)
+    expect(seen).toHaveLength(49)
     expect(new Set(seen.flatMap((s) => s.keys))).toEqual(new Set(['ok']))
   })
 })

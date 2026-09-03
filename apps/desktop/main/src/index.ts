@@ -1,5 +1,7 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, safeStorage, session } from 'electron'
+import {
+  app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, session, Tray,
+} from 'electron'
 import { createHistory } from '@cairn/history'
 import { createSearchIndex } from '@cairn/search'
 import { createHotkey } from '@cairn/hotkey'
@@ -21,6 +23,7 @@ import {
 import { loadConfig, saveConfig } from './config'
 import { createStderrLogger } from './logger'
 import { assertEditMenuIntact, buildAppMenuTemplate } from './menu'
+import { createTray, trayIconPath, type TrayLike } from './tray'
 import { composeApp } from './wiring'
 import { cspPolicy, createPaletteWindow, hardenSession, resolveRuntimeMode } from './windows'
 
@@ -61,6 +64,21 @@ if (!app.requestSingleInstanceLock()) {
 const mode = resolveRuntimeMode({ isPackaged: app.isPackaged, env: process.env })
 const logger = createStderrLogger({ clock: systemClock, minLevel: mode === 'packaged' ? 'info' : 'debug' })
 
+// `app.getAppPath()` is NOT the repo root. Unpackaged it is `<repo>/apps/desktop` — the only
+// package.json with a `main`, so that is the app root Electron is handed. Packaged it is
+// `Cairn.app/Contents/Resources/app`. The agent binary and the tray icon sit OUTSIDE that directory
+// in both layouts, at different depths, which is why this is computed once here rather than inline.
+// `app.isPackaged` and not `mode`: CAIRN_HARDENED=1 makes `mode` 'packaged' during development, and
+// the paths must stay the development ones then.
+//   dev      <repo>/apps/desktop         -> ../..      = <repo>
+//   packaged .../Contents/Resources/app  -> ..         = .../Contents/Resources
+const AGENT_DIR = app.isPackaged
+  ? join(app.getAppPath(), '..')
+  : join(app.getAppPath(), '..', '..')
+const RESOURCES_DIR = app.isPackaged
+  ? join(app.getAppPath(), '..')
+  : join(app.getAppPath(), 'resources')
+
 app.on('second-instance', () => {
   paletteRef?.show()
 })
@@ -70,6 +88,9 @@ app.on('second-instance', () => {
 app.on('window-all-closed', () => {})
 
 let paletteRef: { show(): void } | null = null
+/** Module scope on purpose: a Tray only referenced inside a function is collected and the icon
+ *  disappears from the menu bar a few seconds after launch. */
+let trayRef: TrayLike | null = null
 
 async function main(): Promise<void> {
   // The Dock icon goes away here rather than via Info.plist, because M1 produces no bundle —
@@ -147,7 +168,7 @@ async function main(): Promise<void> {
     // app.getAppPath() is <repo>/apps/desktop: that directory holds the only package.json with a
     // `main`, so it is the app root Electron is given. The agent lives at the REPO root, two up.
     // (M3 packaging moves it into Contents/Resources and revisits this one line.)
-    binPath: join(app.getAppPath(), '..', '..', 'agents', 'macos', 'build', AGENT_BIN_NAME),
+    binPath: join(AGENT_DIR, 'agents', 'macos', 'build', AGENT_BIN_NAME),
     clock: systemClock,
     logger,
   })
@@ -224,7 +245,24 @@ async function main(): Promise<void> {
   const started = await cairn.start()
   if (!started.ok) throw new Error(`cairn: startup failed: ${started.code} ${started.message}`)
 
-  app.on('before-quit', () => { void cairn.stop() })
+  // The menu bar icon, created AFTER start() so it never appears while the app is still unusable —
+  // and so it can label itself with the accelerator that actually bound. Held in a module-level
+  // variable because a Tray that is only referenced locally is garbage collected and vanishes from
+  // the menu bar seconds after launch.
+  trayRef = createTray({
+    icon: nativeImage.createFromPath(trayIconPath(RESOURCES_DIR)),
+    makeTray: (icon) => new Tray(icon as Electron.NativeImage),
+    buildMenu: (template) => Menu.buildFromTemplate([...template] as Electron.MenuItemConstructorOptions[]),
+    accelerator: started.value.accelerator,
+    onToggle: () => { cairn.togglePalette() },
+    onQuit: () => { app.quit() },
+    logger,
+  })
+
+  app.on('before-quit', () => {
+    trayRef?.destroy()
+    void cairn.stop()
+  })
 }
 
 void app.whenReady().then(main)

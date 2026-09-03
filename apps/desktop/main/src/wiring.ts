@@ -79,6 +79,8 @@ export interface ComposeDeps {
 export interface CairnApp {
   start(): Promise<Result<{ accelerator: string; hotkeyStatus: HotkeyStatus }>>
   stop(): Promise<void>
+  /** Show the palette if hidden, hide it if shown. What the hot key and the tray icon both call. */
+  togglePalette(): void
   evictPreviewCache(reason: EvictReason): void
   recallCopy(id: ItemId): Promise<Result<{ result: 'copied-manual'; reason: 'user-preference' }>>
   previewText(id: ItemId): Promise<Result<{ text: string; isHtmlSource: boolean; truncated: boolean }>>
@@ -128,6 +130,20 @@ export function composeApp(deps: ComposeDeps): CairnApp {
   /** True between a passphrase-mode screen lock and the next unlock, so the user is told why the
    *  history went away instead of being shown a silently empty palette. */
   let relockedOnScreenLock = false
+
+  /**
+   * The single way the palette opens. Both entry points — the global hot key and the menu bar icon
+   * — go through here, because "show the window" is only half of it: the renderer reloads its list
+   * on `palette.shown`, so an entry point that skips the event opens a stale palette.
+   */
+  const togglePalette = (): void => {
+    if (palette.isVisible()) {
+      palette.hide()
+      return
+    }
+    palette.show()
+    sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt: clock.now() }, logger)
+  }
 
   const evictPreviewCache = (reason: EvictReason): void => {
     history.evictPreviewCache()
@@ -226,6 +242,8 @@ export function composeApp(deps: ComposeDeps): CairnApp {
   }
 
   return {
+    togglePalette,
+
     async start() {
       // 0. IPC FIRST. This used to be step 5, reasoned as "IPC last, so no handler can be called
       //    before its dependencies exist" — which had the race backwards. The palette window is
@@ -286,14 +304,10 @@ export function composeApp(deps: ComposeDeps): CairnApp {
       if (!bound.ok) logger.warn('hotkey.bind-failed', { accelerator, code: bound.code })
       sendIpcEvent(paletteTarget, 'cairn:hotkey.status', { status, accelerator }, logger)
 
-      hotkey.onTrigger(() => {
-        if (palette.isVisible()) {
-          palette.hide()
-          return
-        }
-        palette.show()
-        sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt: clock.now() }, logger)
-      })
+      // The tray icon is the second way in, and it must be the SAME way in: show/hide plus the
+      // palette.shown event the renderer reloads on. Two copies of this drifted immediately in
+      // testing — the tray opened a stale list because it skipped the event.
+      hotkey.onTrigger(togglePalette)
 
       // 5. (IPC used to be registered here. See step 0 for why it cannot be.)
 

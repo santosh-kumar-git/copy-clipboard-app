@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   AGENT_REQUEST_TIMEOUT_MS,
@@ -363,38 +363,63 @@ it('replaces the child after 10 unparseable lines in a row', async () => {
 })
 
 it('writes the reassembled payload to NO file anywhere under the temp directory', async () => {
-  // The `node:os` temp-path helper is deliberately NOT imported here: its name is one of the
-  // substrings the local scan below bans across every .ts file in this package, test files
-  // included. Listing the tree needs only the env var, so use it.
-  const tempRoot = process.env['TMPDIR'] ?? '/tmp'
-  const { agent } = stub('chunked-image')
+  // $TMPDIR is redirected to a private, EMPTY directory for the duration, the same way
+  // packages/capture/src/capture.security.test.ts does it. This is both stricter and finite.
+  //
+  // It used to scan the shared temp directory and read every file in it. That is unbounded work
+  // which grows with whatever else has run on the machine — it reached 9.7s and blew the 5s test
+  // timeout — and it is weaker, because the interesting assertion is "the private directory stayed
+  // empty", not "no file in a directory full of other processes' junk happens to contain these
+  // bytes". A leaked temp file would land here: any temp path is derived from $TMPDIR at call time.
+  //
+  // The `node:os` temp-path helper is deliberately NOT imported: its name is one of the substrings
+  // the local scan below bans across every .ts file in this package, test files included.
+  const sharedRoot = process.env['TMPDIR'] ?? '/tmp'
+  const sandbox = join(sharedRoot, `cairn-agent-host-${process.pid}-${Date.now()}`)
+  mkdirSync(sandbox, { recursive: true })
+  const previous = process.env['TMPDIR']
+
   const changes: ClipboardChangedPayload[] = []
-  agent.on('clipboard.changed', (p) => changes.push(p))
   try {
-    await agent.start()
-    await agent.request('watch.start', { intervalMs: 500 })
-    await waitFor(() => changes.length === 1, 'the reassembled clipboard.changed')
-  } finally {
-    await agent.dispose()
-  }
-  const payload = fillerBytes(200_000)
-  const head = payload.subarray(0, 48)
-  const middle = payload.subarray(100_000, 100_048)
-  // EVERY file, not just files created during this test: a leaked payload file written by an
-  // earlier test in this same file would otherwise hide inside a "before" snapshot. Other vitest
-  // workers churn this directory concurrently, which is fine — the assertion is about payload
-  // bytes, not about the file list being unchanged.
-  for (const f of listFiles(tempRoot)) {
-    let bytes: Buffer
+    process.env['TMPDIR'] = sandbox
+    const { agent } = stub('chunked-image')
+    agent.on('clipboard.changed', (p) => changes.push(p))
     try {
-      if (statSync(f).size > 8 * 1024 * 1024) continue
-      bytes = readFileSync(f)
-    } catch {
-      continue
+      await agent.start()
+      await agent.request('watch.start', { intervalMs: 500 })
+      await waitFor(() => changes.length === 1, 'the reassembled clipboard.changed')
+    } finally {
+      await agent.dispose()
     }
-    expect(bytes.includes(head), `${f} contains the payload head`).toBe(false)
-    expect(bytes.includes(middle), `${f} contains payload bytes`).toBe(false)
+
+    // 1. Nothing at all was created. The strict form of the assertion.
+    const files = listFiles(sandbox)
+    expect(files, 'the private temp directory must still be empty').toEqual([])
+
+    // 2. …and if that ever loosens, the payload bytes themselves are still checked.
+    const payload = fillerBytes(200_000)
+    const head = payload.subarray(0, 48)
+    const middle = payload.subarray(100_000, 100_048)
+    for (const f of files) {
+      let bytes: Buffer
+      try {
+        if (statSync(f).size > 8 * 1024 * 1024) continue
+        bytes = readFileSync(f)
+      } catch {
+        continue
+      }
+      expect(bytes.includes(head), `${f} contains the payload head`).toBe(false)
+      expect(bytes.includes(middle), `${f} contains payload bytes`).toBe(false)
+    }
+  } finally {
+    if (previous === undefined) delete process.env['TMPDIR']
+    else process.env['TMPDIR'] = previous
+    rmSync(sandbox, { recursive: true, force: true })
   }
+
+  // The reassembly really happened, so none of the above is vacuous.
+  expect(changes).toHaveLength(1)
+  expect(changes[0]?.reps.length).toBe(2)
 })
 
 it('has no temp-file or file-write identifier anywhere in the package source', () => {
