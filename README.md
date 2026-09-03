@@ -84,13 +84,22 @@ startup and `hotkey.fired` on each press are the two to look for.
 ## Install it (macOS, local)
 
 ```sh
-npm run package:mac      # builds dist/Cairn.app (~300 MB, most of it Electron)
-open dist                # then drag Cairn.app to /Applications
+npm run dmg              # builds dist/Cairn.app, then dist/Cairn-<version>.dmg (~145 MB)
+open dist/Cairn-0.1.0.dmg # drag Cairn onto the Applications shortcut in the window
 ```
+
+`npm run package:mac` stops after the `.app` if you would rather drag that straight out of `dist/`.
 
 **First launch must be right-click → Open**, once. The bundle is unsigned and not notarized, so
 double-clicking gets "Cairn is damaged or can't be opened" — that is Gatekeeper refusing an unsigned
-app, not a broken build. After the first Open, it launches normally forever.
+app, not a broken build. After the first Open, it launches normally forever. A DMG does not change
+this: it changes how the app is delivered, not whether Gatekeeper trusts it.
+
+If macOS refuses even after right-click → Open, the quarantine flag can be cleared explicitly:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Cairn.app
+```
 
 Cairn has no Dock icon and no window (`LSUIElement`). It lives in the **menu bar** as three stacked
 stones:
