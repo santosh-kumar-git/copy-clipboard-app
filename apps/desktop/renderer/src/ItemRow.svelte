@@ -5,6 +5,7 @@
     ROW_HEIGHT_PX,
     highlightSegments,
     kindChipLabel,
+    rowFallbackLabel,
     secretExpiryLabel,
   } from './palette-state.svelte'
 
@@ -40,9 +41,16 @@
   {#if thumbnail !== null}
     <img class="thumb" src={thumbnail} alt="" width="32" height="32" />
   {/if}
-  <span class="row-preview"
-    >{#each segments as seg, i (i)}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span
-  >
+  {#if item.preview.length === 0}
+    <!-- An image has no text preview and, until thumbnails are actually served, no thumbnail
+         either — so the row rendered completely blank, which looked exactly like the evicted
+         preview-cache bug. Describing the item keeps "blank row" meaning "something is wrong". -->
+    <span class="row-preview row-preview-fallback">{rowFallbackLabel(item)}</span>
+  {:else}
+    <span class="row-preview"
+      >{#each segments as seg, i (i)}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span
+    >
+  {/if}
   {#if item.pinned}<span class="badge badge-pinned">Pinned</span>{/if}
   {#if item.flags.includes('secret')}
     <span class="badge badge-secret">Secret{expiry === null ? '' : ` · ${expiry}`}</span>

@@ -24,6 +24,17 @@ The security-relevant half: a masked secret disappears from the palette at its 5
 that removal is eviction's job too. Wiring is small — call `evictNow()` at startup and after each
 ingest — and `retention.test.ts` already covers the policy itself.
 
+### Image thumbnails are captured but never served — S
+`@cairn/capture` generates a JPEG thumbnail per image, the store holds it, `ItemSummary` has a
+`thumbnailDataUrl` field and `ItemRow.svelte` already renders one when present — but
+`toItemSummary(item, null)` in `apps/desktop/main/src/ipc-handlers.ts` passes `null` on both the
+`list` and `search` paths, so it is always absent. Image rows therefore had no text preview AND no
+image, and rendered completely blank; they now show `Image · 235 KB` instead, which is a description
+rather than the thing itself.
+
+Serving them means decrypting one blob per visible row and handing image bytes to the renderer, so it
+wants a decision about caching and about `img-src data:` in the CSP — small, but not a one-liner.
+
 ### No settings UI — M
 Every setting lives in `~/Library/Application Support/Cairn/config.json`, is read once at startup,
 and needs a relaunch. Worse, an invalid or incomplete file is rejected **whole**, silently falling

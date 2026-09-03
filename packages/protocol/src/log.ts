@@ -14,6 +14,7 @@ export const LOG_EVENTS = [
   'capture.candidate', 'capture.self-write-suppressed', 'capture.debounced', 'capture.thumbnail',
   'privacy.skipped', 'privacy.masked', 'privacy.sync-refused',
   'history.ingested', 'history.duplicate', 'history.evicted', 'history.pinned', 'history.removed',
+  'history.previews-reloaded', 'history.preview-reload-failed',
   'store.opened', 'store.appended', 'store.compacted', 'store.torn-line-discarded',
   'store.blob-written',
   'keyring.mode', 'keyring.backend-refused', 'keyring.unlock-failed', 'keyring.zeroed',

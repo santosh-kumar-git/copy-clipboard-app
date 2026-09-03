@@ -132,9 +132,37 @@ export function composeApp(deps: ComposeDeps): CairnApp {
   let relockedOnScreenLock = false
 
   /**
+   * Re-reads the encrypted store when the preview cache has been evicted.
+   *
+   * Spec §11 control 6 drops every decrypted preview on screen lock, sleep and five minutes idle.
+   * That eviction is one-way by construction — `evictPreviewCache()` blanks the previews and stops
+   * answering searches "until load() re-reads the encrypted store" — and NOTHING called load()
+   * again. So after the first time the machine slept, every older row rendered with an empty preview
+   * and search returned nothing at all, until the app was restarted. Reported as "yesterday's copies
+   * are not visible"; the real boundary was the sleep, not the date.
+   *
+   * Re-reading is safe precisely when the key is still available. In passphrase mode a screen lock
+   * also zero-fills the key, and `relockedOnScreenLock` marks that: decryption would fail, and the
+   * user has already been told why by KEYRING_RELOCKED_BANNER. So that case is left alone.
+   */
+  const ensurePreviews = async (): Promise<void> => {
+    if (!history.previewsEvicted() || relockedOnScreenLock) return
+    const reloaded = await history.load()
+    if (!reloaded.ok) {
+      logger.error('history.preview-reload-failed', { code: reloaded.code })
+      return
+    }
+    logger.info('history.previews-reloaded', { count: reloaded.value.items })
+  }
+
+  /**
    * The single way the palette opens. Both entry points — the global hot key and the menu bar icon
    * — go through here, because "show the window" is only half of it: the renderer reloads its list
    * on `palette.shown`, so an entry point that skips the event opens a stale palette.
+   *
+   * The window is shown FIRST and the event sent after the reload, so the palette never feels laggy
+   * on the hot key: the renderer reloads its list when `palette.shown` arrives, which is the point
+   * at which the previews have to be back.
    */
   const togglePalette = (): void => {
     if (palette.isVisible()) {
@@ -142,7 +170,17 @@ export function composeApp(deps: ComposeDeps): CairnApp {
       return
     }
     palette.show()
-    sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt: clock.now() }, logger)
+    const announce = (): void => {
+      sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt: clock.now() }, logger)
+    }
+    // The common path stays SYNCHRONOUS. Deferring the event by a microtask on every open would make
+    // every caller — and every test — care about promise timing for no benefit; only the evicted
+    // path has anything to wait for.
+    if (!history.previewsEvicted() || relockedOnScreenLock) {
+      announce()
+      return
+    }
+    void ensurePreviews().then(announce)
   }
 
   const evictPreviewCache = (reason: EvictReason): void => {
@@ -338,9 +376,14 @@ export function composeApp(deps: ComposeDeps): CairnApp {
         if (relockedOnScreenLock) {
           relockedOnScreenLock = false
           sendIpcEvent(paletteTarget, 'cairn:toast', { text: KEYRING_RELOCKED_BANNER, tone: 'warn' }, logger)
+          return
         }
+        void ensurePreviews()
       })
-      powerMonitor.on('resume', () => { evictedWhileIdle = false })
+      powerMonitor.on('resume', () => {
+        evictedWhileIdle = false
+        void ensurePreviews()
+      })
       armIdleTick()
 
       logger.info('app.ready', { mode: keyring.getMode() })

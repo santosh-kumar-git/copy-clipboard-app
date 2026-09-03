@@ -11,6 +11,8 @@ import {
   filePathsFromPreview,
   highlightSegments,
   kindChipLabel,
+  formatBytes,
+  rowFallbackLabel,
   nextIndex,
   secretExpiryLabel,
   visibleRange,
@@ -234,5 +236,32 @@ describe('PaletteState', () => {
 
     fake.emitHotkeyStatus({ status: 'failed', accelerator: 'Cmd+Shift+V' })
     expect(state.hotkeyStatus).toBe('failed')
+  })
+})
+
+describe('rows with no text preview', () => {
+  // An image has no text preview, and thumbnails are captured but not yet served to the renderer, so
+  // these rows rendered completely blank — visually identical to the evicted preview-cache bug.
+  it('describes the item instead of rendering nothing', () => {
+    expect(rowFallbackLabel({ kind: 'image', byteLength: 240_154 })).toBe('Image · 235 KB')
+    expect(rowFallbackLabel({ kind: 'files', byteLength: 512 })).toBe('Files · 512 B')
+  })
+
+  it('formats bytes without pretending to more precision than is useful', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(999)).toBe('999 B')
+    expect(formatBytes(1024)).toBe('1.0 KB')
+    expect(formatBytes(1536)).toBe('1.5 KB')
+    // Over ten units the decimal is noise, so it goes.
+    expect(formatBytes(20 * 1024)).toBe('20 KB')
+    expect(formatBytes(240_154)).toBe('235 KB')
+    expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB')
+    expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe('3.0 GB')
+  })
+
+  it('never returns an empty string, whatever the size', () => {
+    for (const n of [0, 1, 1023, 1024, 1e6, 1e9, 1e12]) {
+      expect(formatBytes(n).length).toBeGreaterThan(1)
+    }
   })
 })
