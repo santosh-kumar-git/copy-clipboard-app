@@ -78,6 +78,25 @@ it('the macOS agent has no filesystem write path for clipboard bytes', () => {
   }
 })
 
+/**
+ * `NSFileHandle.writeData:` raises an OBJECTIVE-C exception when its descriptor is gone, and Swift
+ * cannot catch that: it goes straight to abort(). Since the agent's stdout and stderr both close when
+ * the host exits, the "stdin closed; exiting" breadcrumb turned every normal quit into SIGABRT and a
+ * crash report in DiagnosticReports. Raw write(2) returns -1 instead, which is a value we can handle.
+ *
+ * This is a reliability ban rather than a security one, but it lives here because this is the file
+ * that already scans the Swift sources, and the failure mode — an abort on shutdown — looks exactly
+ * like a crash worth investigating.
+ */
+it('the macOS agent writes to its own pipes with write(2), never a raising FileHandle API', () => {
+  for (const banned of ['FileHandle.standardError.write', 'FileHandle.standardOutput.write']) {
+    expect(formatHits(findInSources(banned, AGENT_SOURCES)), `banned: ${banned}`).toBe('')
+  }
+  // And the safe form is genuinely present, so the ban above is not passing because the writer was
+  // deleted entirely.
+  expect(findInSources('Darwin.write(', AGENT_SOURCES).length).toBeGreaterThan(0)
+})
+
 it('the macOS agent has no network egress path and spawns no child process', () => {
   for (const banned of BANNED_EGRESS) {
     expect(formatHits(findInSources(banned, AGENT_SOURCES)), `banned: ${banned}`).toBe('')

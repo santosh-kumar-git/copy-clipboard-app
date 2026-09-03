@@ -90,6 +90,11 @@ describe('composeApp binds nothing (contract §8)', () => {
         list: () => ({ items: [], total: 0 }),
         onChange: () => noop,
         evictPreviewCache: noop,
+        previewsEvicted: () => false,
+        setMaxItems: noop,
+        // start() enforces retention now, so the fake needs this or start() throws before the
+        // assertion below ever runs.
+        evictNow: async () => ({ ok: true, value: { evicted: 0 } }),
         resolveReps: async () => ({ ok: true, value: [] }),
       } as never,
       hotkey: {

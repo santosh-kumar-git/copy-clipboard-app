@@ -107,28 +107,48 @@ enum Out {
     line(Event(event: "log", data: LogData(event: event, fields: fields, level: level)))
   }
 
+  /// Raw write(2), NOT FileHandle.write.
+  ///
+  /// `NSFileHandle.writeData:` raises an OBJECTIVE-C exception when the descriptor is gone, and Swift
+  /// cannot catch that — it goes straight to `abort()`. When the host process exits, both our stdout
+  /// and our stderr close, so the stdin thread's "stdin closed; exiting" breadcrumb was the last thing
+  /// this process ever did: SIGABRT and a crash report, every single time the app quit normally.
+  /// [verified] two `cairn-agent-macos` reports in DiagnosticReports, faulting frame
+  /// `-[NSConcreteFileHandle writeData:]` -> `objc_exception_throw` -> `abort`.
+  ///
+  /// The result is ignored on purpose: if stderr is unwritable there is nowhere left to report it to,
+  /// and failing to log must never be fatal.
   static func stderrLine(_ s: String) {
-    FileHandle.standardError.write(Data((s + "\n").utf8))
+    _ = writeAll(Data((s + "\n").utf8), to: 2)
   }
 
-  private static func writeAll(_ data: Data) {
-    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-      guard let base = raw.baseAddress else { return }
+  /// Returns false if the descriptor could not take every byte. Never throws and never raises: the
+  /// only failure mode a closed pipe should have is a return value.
+  @discardableResult
+  private static func writeAll(_ data: Data, to fd: Int32) -> Bool {
+    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+      guard let base = raw.baseAddress else { return true }
       var off = 0
       while off < raw.count {
-        let n = Darwin.write(1, base.advanced(by: off), raw.count - off)
+        let n = Darwin.write(fd, base.advanced(by: off), raw.count - off)
         if n > 0 {
           off += n
         } else if errno == EINTR {
           continue
         } else {
-          // stdout is gone: the host died. There is nothing left to log to, so leave a breadcrumb
-          // on stderr and exit.
-          stderrLine("cairn-agent: stdout closed (errno \(errno)); exiting")
-          exit(70)
+          return false
         }
       }
+      return true
     }
+  }
+
+  private static func writeAll(_ data: Data) {
+    if writeAll(data, to: 1) { return }
+    // stdout is gone: the host died. Leave a breadcrumb if stderr still exists — stderrLine cannot
+    // fail — and exit. 70 is EX_SOFTWARE, which the host's restart logic already understands.
+    stderrLine("cairn-agent: stdout closed (errno \(errno)); exiting")
+    exit(70)
   }
 }
 

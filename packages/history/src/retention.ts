@@ -1,5 +1,4 @@
 import {
-  RETENTION_MAX_AGE_MS,
   RETENTION_MAX_BYTES,
   RETENTION_MAX_ITEMS,
   SECRET_TTL_MS,
@@ -10,14 +9,15 @@ import {
 
 export interface RetentionLimits {
   readonly maxItems: number
-  readonly maxAgeMs: number
+  /** null = never expire by age. The count limit is the promise; age is opt-in. */
+  readonly maxAgeMs: number | null
   readonly maxBytes: number
   readonly secretTtlMs: number
 }
 
 export const DEFAULT_RETENTION: RetentionLimits = {
   maxItems: RETENTION_MAX_ITEMS,
-  maxAgeMs: RETENTION_MAX_AGE_MS,
+  maxAgeMs: null,
   maxBytes: RETENTION_MAX_BYTES,
   secretTtlMs: SECRET_TTL_MS,
 }
@@ -75,7 +75,9 @@ export function planEviction(
   // 2. Age.
   for (const it of newestFirst) {
     if (it.pinned || doomed.has(it.id)) continue
-    if (nowMs - it.createdAt >= limits.maxAgeMs) condemn(it, 'retention-age')
+    if (limits.maxAgeMs !== null && nowMs - it.createdAt >= limits.maxAgeMs) {
+      condemn(it, 'retention-age')
+    }
   }
   // 3. Count.
   let kept = 0

@@ -3,25 +3,42 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_ACCELERATOR, RETENTION_MAX_BYTES, RETENTION_MAX_ITEMS } from '@cairn/protocol'
-import { CONFIG_FILE_NAME, configPath, DEFAULT_CONFIG, loadConfig, saveConfig } from './config'
+import { CONFIG_FILE_NAME, ConfigSchema, configPath, DEFAULT_CONFIG, loadConfig, saveConfig } from './config'
 
 let dir = ''
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cairn-cfg-')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 describe('DEFAULT_CONFIG', () => {
-  it('ships the accelerator the first-run step pre-selects and the frozen retention limits', () => {
+  it('ships the accelerator the first-run step pre-selects and a COUNT-only retention default', () => {
     expect(DEFAULT_CONFIG).toEqual({
       version: 1,
       accelerator: DEFAULT_ACCELERATOR,
       firstRunHotkeyDone: false,
       retention: {
         maxItems: RETENTION_MAX_ITEMS,
-        maxAgeMs: 30 * 24 * 60 * 60 * 1_000,
+        // null, not 30 days. The product promise is "the last N copies", so nothing expires merely
+        // for being old; a copy from last year is still one of the last N until N newer ones exist.
+        maxAgeMs: null,
         maxBytes: RETENTION_MAX_BYTES,
       },
     })
     expect(DEFAULT_CONFIG.accelerator).toBe('Cmd+Shift+V')
+    expect(DEFAULT_CONFIG.retention.maxItems).toBe(500)
+  })
+
+  it('accepts an opt-in age limit but never invents one', () => {
+    const withAge = ConfigSchema.safeParse({
+      ...DEFAULT_CONFIG,
+      retention: { ...DEFAULT_CONFIG.retention, maxAgeMs: 60_000 },
+    })
+    expect(withAge.success).toBe(true)
+    // Below the floor is still rejected, so "opt-in" does not mean "unvalidated".
+    const tooSmall = ConfigSchema.safeParse({
+      ...DEFAULT_CONFIG,
+      retention: { ...DEFAULT_CONFIG.retention, maxAgeMs: 59_999 },
+    })
+    expect(tooSmall.success).toBe(false)
   })
 })
 

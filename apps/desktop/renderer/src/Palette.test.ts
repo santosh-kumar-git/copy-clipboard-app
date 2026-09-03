@@ -3,7 +3,13 @@ import { flushSync, mount, unmount, type ComponentProps } from 'svelte'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import ItemRow from './ItemRow.svelte'
 import Palette from './Palette.svelte'
-import { PaletteState, ROW_HEIGHT_PX, TOAST_MS, VISIBLE_ROWS } from './palette-state.svelte'
+import {
+  PaletteState,
+  ROW_HEIGHT_PX,
+  SHORTCUT_HINTS,
+  TOAST_MS,
+  VISIBLE_ROWS,
+} from './palette-state.svelte'
 import { createFakeApi, makeItem, testItemId, type FakeApi } from './testing'
 
 let host: HTMLDivElement
@@ -293,5 +299,27 @@ describe('the props shape', () => {
       'selected',
       'top',
     ])
+  })
+})
+
+describe('the shortcut hints', () => {
+  // Pin (Cmd+P) and delete (Cmd+Backspace) have always worked and were never mentioned anywhere, so
+  // in practice the pin feature did not exist for anyone who had not read the source.
+  it('names pin and delete, which are reachable no other way', async () => {
+    await render(createFakeApi({ items: [makeItem(1)] }))
+    const hints = host.querySelector('[data-testid="hints"]')
+    expect(hints).not.toBeNull()
+    const text = hints?.textContent ?? ''
+    expect(text).toContain('pin')
+    expect(text).toContain('⌘P')
+    expect(text).toContain('delete')
+    expect(text).toContain('⌘⌫')
+  })
+
+  it('names every shortcut the palette actually handles', () => {
+    // Guards the drift that makes hints worse than none: a key handled but not listed, or listed but
+    // no longer handled.
+    const handled = ['↑↓', '⏎', '⌘P', '⌘⌫', 'esc']
+    expect(SHORTCUT_HINTS.map((h) => h.keys)).toEqual(handled)
   })
 })

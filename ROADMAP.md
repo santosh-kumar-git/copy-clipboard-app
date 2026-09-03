@@ -13,17 +13,6 @@ Effort: **S** ≈ a day · **M** ≈ a few days · **L** ≈ a week or two · **
 These are not "future features" — they are places where v1 is less than it appears. Listed first
 because they are corrections, not additions.
 
-### Retention is configured but never enforced — S
-`config.json` accepts `retention.maxItems`, `maxAgeMs` and `maxBytes`, and `planEviction()` in
-`packages/history/src/retention.ts` implements all three correctly, with pins exempt. But the only
-caller is `history.evictNow()`, and **nothing calls that** — not on ingest, not on a timer, not at
-startup. So history grows without bound and the three settings have no effect.
-
-The security-relevant half: a masked secret disappears from the palette at its 5-minute TTL because
-`list()` filters on `isLive()` at read time, but its encrypted record and blob stay on disk, because
-that removal is eviction's job too. Wiring is small — call `evictNow()` at startup and after each
-ingest — and `retention.test.ts` already covers the policy itself.
-
 ### Image thumbnails are captured but never served — S
 `@cairn/capture` generates a JPEG thumbnail per image, the store holds it, `ItemSummary` has a
 `thumbnailDataUrl` field and `ItemRow.svelte` already renders one when present — but
@@ -35,16 +24,15 @@ rather than the thing itself.
 Serving them means decrypting one blob per visible row and handing image bytes to the renderer, so it
 wants a decision about caching and about `img-src data:` in the CSP — small, but not a one-liner.
 
-### No settings UI — M
-Every setting lives in `~/Library/Application Support/Cairn/config.json`, is read once at startup,
-and needs a relaunch. Worse, an invalid or incomplete file is rejected **whole**, silently falling
-back to every default, with only a `config.loaded-default` log line to say so — so a hand-edit that
-looks reasonable can quietly change nothing.
+### Settings beyond the history limit — M
+"Keep the last N copies" is now in the tray menu and applies live. Everything else — the hot key, the
+byte cap, the optional age limit — is still hand-edited in
+`~/Library/Application Support/Cairn/config.json`, read once at startup, and a file that fails
+validation silently falls back to every default with only a `config.loaded-default` log line to say so.
 
-Wants: a panel for the hotkey and the three retention limits, validation shown in the UI rather than
-in a log, live application without a restart, and a visible reason when a file is rejected.
-`hotkeyFailedText()` in the renderer already tells users "rebinding lives in Settings, which this
-build does not have yet".
+Wants: a real settings panel, validation surfaced in the UI instead of a log, live application without
+a relaunch, and rebinding the hot key — `hotkeyFailedText()` already tells users that "rebinding lives
+in Settings".
 
 ---
 

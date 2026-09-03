@@ -156,7 +156,9 @@ describe('retention through history, with the injected clock', () => {
   })
 
   it('unpinning re-exposes an item to retention', async () => {
-    const { mk, clock } = harness()
+    // Age eviction is opt-in now (the product promise is "the last N copies"), so this test — which
+    // is about pinning exempting an item, not about the default — configures it explicitly.
+    const { mk, clock } = harness({ ...DEFAULT_RETENTION, maxAgeMs: RETENTION_MAX_AGE_MS })
     const hist = mk()
     const a = await hist.ingest(textCandidate('keeper', clock.now()))
     if (!a.ok || a.value.outcome !== 'added') throw new Error('expected outcome "added"')

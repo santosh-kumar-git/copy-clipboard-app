@@ -73,6 +73,15 @@ export interface History {
   evictNow(): Promise<Result<{ evicted: number }>>
   evictPreviewCache(): void
   /**
+   * Changes the item-count limit at runtime. Limits used to be frozen at construction, so a limit
+   * changed in Settings could not take effect until the next launch, and nothing failed to say so.
+   *
+   * Deliberately narrower than a whole-`RetentionLimits` setter: `secretTtlMs` is a security
+   * parameter the composition root owns, and a caller passing `config.retention` — which has no
+   * `secretTtlMs` — would silently reset it.
+   */
+  setMaxItems(maxItems: number): void
+  /**
    * True after `evictPreviewCache()` until the next `load()`. Callers need this because eviction is
    * NOT self-healing: previews are blanked and `search()` answers nothing until the encrypted store
    * is re-read, and `list()` is synchronous so it cannot re-read on its own.
@@ -103,7 +112,7 @@ export function truncatePreview(text: string): { preview: string; previewTruncat
 
 export function createHistory(deps: HistoryDeps): History {
   const { store, privacy, search, clock, logger } = deps
-  const limits = deps.retention ?? DEFAULT_RETENTION
+  let limits = deps.retention ?? DEFAULT_RETENTION
   const items = new Map<ItemId, Item>()
   /** itemId -> the store `seq` of its ITEM_ADDED record. Restart-identical, unlike a random id. */
   const ord = new Map<ItemId, number>()
@@ -374,6 +383,10 @@ export function createHistory(deps: HistoryDeps): History {
       // JavaScript cannot zero a string, so the honest control is to drop every reference and stop
       // answering searches until load() re-reads the encrypted store.
       for (const [id, it] of items) items.set(id, { ...it, preview: '', maskSpans: [] })
+    },
+
+    setMaxItems(maxItems) {
+      limits = { ...limits, maxItems }
     },
 
     previewsEvicted() {

@@ -81,6 +81,10 @@ export interface CairnApp {
   stop(): Promise<void>
   /** Show the palette if hidden, hide it if shown. What the hot key and the tray icon both call. */
   togglePalette(): void
+  /** How many copies are currently kept. Read by the tray so its tick matches the live value. */
+  historyLimit(): number
+  /** Persists a new limit and applies it immediately, deleting anything now over the line. */
+  setHistoryLimit(maxItems: number): Promise<void>
   evictPreviewCache(reason: EvictReason): void
   recallCopy(id: ItemId): Promise<Result<{ result: 'copied-manual'; reason: 'user-preference' }>>
   previewText(id: ItemId): Promise<Result<{ text: string; isHtmlSource: boolean; truncated: boolean }>>
@@ -183,6 +187,23 @@ export function composeApp(deps: ComposeDeps): CairnApp {
     void ensurePreviews().then(announce)
   }
 
+  /**
+   * Applies the retention limits. `history.evictNow()` deletes items AND their blobs, so this is
+   * also what finally removes an expired secret's bytes from disk — `list()` only hides it.
+   *
+   * Failure is logged and swallowed: a store write that fails must not take down an ingest that has
+   * already succeeded, and the next copy tries again.
+   */
+  const enforceRetention = async (): Promise<void> => {
+    const evicted = await history.evictNow()
+    if (!evicted.ok) {
+      logger.error('history.evict-failed', { code: evicted.code })
+      return
+    }
+    // No log line on success: history.evictNow() already emits `history.evicted` with the same count,
+    // and two identical lines per sweep makes the log look like eviction ran twice. Measured.
+  }
+
   const evictPreviewCache = (reason: EvictReason): void => {
     history.evictPreviewCache()
     logger.info(
@@ -282,6 +303,22 @@ export function composeApp(deps: ComposeDeps): CairnApp {
   return {
     togglePalette,
 
+    historyLimit() {
+      return config.retention.maxItems
+    },
+
+    async setHistoryLimit(maxItems) {
+      config = { ...config, retention: { ...config.retention, maxItems } }
+      saveConfig(config)
+      history.setMaxItems(maxItems)
+      logger.info('history.limit-changed', { count: maxItems })
+      // Applied NOW, not at the next copy: choosing "keep 50" and still seeing 500 rows would look
+      // like the setting had been ignored.
+      await enforceRetention()
+      const total = history.list({ limit: 1, offset: 0 }).total
+      sendIpcEvent(paletteTarget, 'cairn:history.changed', { reason: 'evict', total }, logger)
+    },
+
     async start() {
       // 0. IPC FIRST. This used to be step 5, reasoned as "IPC last, so no handler can be called
       //    before its dependencies exist" — which had the race backwards. The palette window is
@@ -304,6 +341,10 @@ export function composeApp(deps: ComposeDeps): CairnApp {
         logger,
       })
 
+      // 0b. Apply retention before anything else can read the list, so a limit lowered while the app
+      //     was closed takes effect immediately rather than waiting for the next copy.
+      await enforceRetention()
+
       // 1. The agent: nothing else in M1 works without it.
       await agent.start()
       await agent.request('watch.start', { intervalMs: WATCH_INTERVAL_MS })
@@ -314,8 +355,13 @@ export function composeApp(deps: ComposeDeps): CairnApp {
       // `noUnusedLocals: true` an inferred callback parameter would make that import an unused-local
       // error (TS6133) now that there is no local `CapturePort` declaration mentioning it.
       capture.onCandidate((candidate: Candidate) => {
-        void history.ingest(candidate).then((r) => {
+        void history.ingest(candidate).then(async (r) => {
           if (!r.ok) return
+          // Enforce the limit on every ingest, which is the only moment the count can EXCEED it.
+          // Until now nothing ever called evictNow(): the three retention limits were configurable,
+          // validated, and completely inert, so history grew without bound and an expired secret's
+          // blob stayed on disk after it had already vanished from the palette.
+          await enforceRetention()
           const total = history.list({ limit: 1, offset: 0 }).total
           sendIpcEvent(paletteTarget, 'cairn:history.changed', { reason: 'ingest', total }, logger)
         })

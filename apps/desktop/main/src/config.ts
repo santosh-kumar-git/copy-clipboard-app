@@ -3,7 +3,6 @@ import { join } from 'node:path'
 import * as z from 'zod'
 import {
   DEFAULT_ACCELERATOR,
-  RETENTION_MAX_AGE_MS,
   RETENTION_MAX_BYTES,
   RETENTION_MAX_ITEMS,
 } from '@cairn/protocol'
@@ -17,8 +16,14 @@ export const ConfigSchema = z.object({
   accelerator: z.string().min(1).max(64),
   firstRunHotkeyDone: z.boolean(),
   retention: z.object({
+    /** THE user-facing setting: keep the last N items. Everything else is a safety net. */
     maxItems: z.int().min(1).max(5_000),
-    maxAgeMs: z.int().min(60_000),
+    /**
+     * null = never expire by age, and that is the DEFAULT. "Keep the last 200 items" means exactly
+     * that; having a copy vanish at 30 days regardless of the count is a different promise, and a
+     * surprising one. Age eviction stays available for anyone who wants it, opt-in only.
+     */
+    maxAgeMs: z.int().min(60_000).nullable(),
     maxBytes: z.int().min(1_048_576),
   }),
 })
@@ -31,7 +36,7 @@ export const DEFAULT_CONFIG: CairnConfig = {
   firstRunHotkeyDone: false,
   retention: {
     maxItems: RETENTION_MAX_ITEMS,
-    maxAgeMs: RETENTION_MAX_AGE_MS,
+    maxAgeMs: null,
     maxBytes: RETENTION_MAX_BYTES,
   },
 }

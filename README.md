@@ -105,14 +105,26 @@ Cairn has no Dock icon and no window (`LSUIElement`). It lives in the **menu bar
 stones:
 
 - **Left click** — opens the history. Click again to dismiss.
-- **Right click** — Open / Quit.
+- **Right click** — Open, **Keep the last…** (how many copies to keep), Quit.
 - **Cmd+Shift+V** — same as left click, from anywhere.
 
-Signing, notarization, a DMG, a login item and auto-update are Milestone 3.
+In the palette: **↑↓** navigate · **⏎** copy · **⌘P** pin · **⌘⌫** delete · **esc** close. Pinned items
+sort to the top and are exempt from the count limit. Secrets cannot be pinned — they expire after five
+minutes by design.
+
+Signing, notarization, a login item and auto-update are Milestone 3.
 
 ## Settings
 
-There is no settings UI yet. Configuration is one file, read once at startup — relaunch to apply:
+**How many copies to keep** is in the menu bar: right-click the icon → **Keep the last…** →
+50 / 100 / 200 / 500 / 1,000 / 2,000. It applies immediately — anything now over the line is deleted,
+blobs included — and survives relaunch.
+
+Retention is **count-based only**. Nothing expires merely for being old: "keep the last 500" means
+exactly that, and a copy from last year stays until 500 newer ones exist. Pinned items are exempt from
+the count entirely, so pinning (⌘P) is how you keep something for good.
+
+Everything else is still one hand-edited file, read once at startup — relaunch to apply:
 
 ```
 ~/Library/Application Support/Cairn/config.json
@@ -120,19 +132,15 @@ There is no settings UI yet. Configuration is one file, read once at startup —
 
 ```json
 { "version": 1, "accelerator": "Cmd+Shift+V", "firstRunHotkeyDone": true,
-  "retention": { "maxItems": 500, "maxAgeMs": 2592000000, "maxBytes": 536870912 } }
+  "retention": { "maxItems": 500, "maxAgeMs": null, "maxBytes": 536870912 } }
 ```
 
-`maxItems` 1–5000 · `maxAgeMs` ≥ 60000 (default 30 days) · `maxBytes` ≥ 1048576 (default 512 MiB).
+`maxItems` 1–5000 · `maxAgeMs` `null` (off) or ≥ 60000 · `maxBytes` ≥ 1048576 — a 512 MiB safety cap,
+not the thing you tune.
 
-Two things to know before editing it:
-
-- **The file is validated as a whole.** One bad or missing field rejects all of it and every default
-  is used instead, with only a `config.loaded-default` line on stdout to say so. Keep every field.
-- **The three retention limits currently do nothing.** The policy is implemented and tested, but
-  nothing calls the eviction that applies it, so history grows without bound and expired secrets stay
-  on disk after they vanish from the palette. See "Known gaps in v1" in `ROADMAP.md`.
-
+One thing to know before hand-editing: **the file is validated as a whole.** One bad or missing field
+rejects all of it and every default is used instead, with only a `config.loaded-default` line on stdout
+to say so. Keep every field.
 ## Distribution
 
 macOS ships as a notarized direct download when there's a Developer ID; the **Mac App Store is
