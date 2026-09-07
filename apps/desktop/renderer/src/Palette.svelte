@@ -3,14 +3,17 @@
   import Preview from './Preview.svelte'
   import Toast from './Toast.svelte'
   import {
-    EMPTY_TEXT,
+    ALL_TAB,
+    PINNED_TAB,
     SHORTCUT_HINTS,
-    NO_RESULTS_TEXT,
     PaletteState,
     ROW_HEIGHT_PX,
+    TAG_PLACEHOLDER,
     VISIBLE_ROWS,
     filePathsFromPreview,
     hotkeyFailedText,
+    sameTab,
+    type ActiveTab,
     type NavKey,
   } from './palette-state.svelte'
 
@@ -23,6 +26,7 @@
 
   let inputEl: HTMLInputElement | null = $state(null)
   let listEl: HTMLDivElement | null = $state(null)
+  let tagEl: HTMLInputElement | null = $state(null)
 
   const selected = $derived(palette.selectedItem)
   const activeId = $derived(selected === null ? null : `cairn-row-${selected.id}`)
@@ -30,10 +34,29 @@
     selected !== null && selected.kind === 'files' ? filePathsFromPreview(palette.previewText) : [],
   )
 
+  /** All, Pinned, then one per tab that has an item. Pinned is always shown even when empty: it is
+   *  the tab that promises nothing in it is ever evicted, so it has to be visible to be believed. */
+  const tabs: { tab: ActiveTab; label: string; count: number | null }[] = $derived([
+    { tab: ALL_TAB, label: 'All', count: null },
+    { tab: PINNED_TAB, label: 'Pinned', count: palette.pinnedCount },
+    ...palette.tabs.map((t) => ({
+      tab: { kind: 'tag', tag: t.tag } as ActiveTab,
+      label: t.tag,
+      count: t.count,
+    })),
+  ])
+
   // The palette is re-shown without being re-created, so focus follows `shownAt`, not mount.
   $effect(() => {
     void palette.shownAt
     inputEl?.focus()
+  })
+
+  // Opening the tab field moves focus into it, and closing it hands focus back — otherwise the next
+  // keystroke after a tab is filed goes nowhere at all.
+  $effect(() => {
+    if (palette.tagging) tagEl?.focus()
+    else inputEl?.focus()
   })
 
   // Clicking away is a dismissal: an accessory panel that lingers after losing focus is a bug.
@@ -51,6 +74,11 @@
     const top = palette.windowStart * ROW_HEIGHT_PX
     if (listEl !== null && listEl.scrollTop !== top) listEl.scrollTop = top
   })
+
+  /** A click on a control in the palette must never take focus off the search field. */
+  function keepFocus(event: MouseEvent): void {
+    event.preventDefault()
+  }
 
   function onKeyDown(event: KeyboardEvent): void {
     const key = event.key
@@ -76,9 +104,29 @@
       palette.pending = palette.togglePin()
       return
     }
+    if ((event.metaKey || event.ctrlKey) && key.toLowerCase() === 't') {
+      event.preventDefault()
+      palette.openTagging()
+      return
+    }
     if ((event.metaKey || event.ctrlKey) && (key === 'Backspace' || key === 'Delete')) {
       event.preventDefault()
       palette.pending = palette.removeSelected()
+    }
+  }
+
+  /** The tab field owns Enter and Escape while it is open, so neither reaches the list. */
+  function onTagKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      palette.pending = palette.commitTag()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      palette.closeTagging()
     }
   }
 </script>
@@ -102,6 +150,61 @@
     oninput={(event) => (palette.pending = palette.setQuery(event.currentTarget.value))}
   />
 
+  <div class="tabs" data-testid="tabs" role="group" aria-label="Tabs">
+    {#each tabs as t (t.label)}
+      <button
+        type="button"
+        class="tab"
+        class:tab-active={sameTab(t.tab, palette.activeTab)}
+        aria-pressed={sameTab(t.tab, palette.activeTab)}
+        onmousedown={keepFocus}
+        onclick={() => (palette.pending = palette.selectTab(t.tab))}
+      >
+        {t.label}{#if t.count !== null}<span class="tab-count">{t.count}</span>{/if}
+      </button>
+    {/each}
+    <button
+      type="button"
+      class="tab tab-new"
+      data-testid="new-tab"
+      title="File the selected copy into a tab — anything in a tab is kept, never evicted"
+      disabled={selected === null}
+      onmousedown={keepFocus}
+      onclick={() => palette.openTagging()}>+ Tab</button
+    >
+  </div>
+
+  {#if palette.tagging}
+    <div class="tag-row" data-testid="tag-row">
+      <input
+        bind:this={tagEl}
+        class="tag-input"
+        data-testid="tag-input"
+        type="text"
+        list="cairn-tab-names"
+        aria-label="Tab name"
+        placeholder={TAG_PLACEHOLDER}
+        autocomplete="off"
+        spellcheck="false"
+        value={palette.tagDraft}
+        oninput={(event) => (palette.tagDraft = event.currentTarget.value)}
+        onkeydown={onTagKeyDown}
+      />
+      <datalist id="cairn-tab-names">
+        {#each palette.tabs as t (t.tag)}<option value={t.tag}></option>{/each}
+      </datalist>
+      {#each selected?.tags ?? [] as tag (tag)}
+        <button
+          type="button"
+          class="tag-chip"
+          title={`Take this copy out of ${tag}`}
+          onmousedown={keepFocus}
+          onclick={() => (palette.pending = palette.untag(tag))}>{tag} ✕</button
+        >
+      {/each}
+    </div>
+  {/if}
+
   {#if palette.hotkeyStatus === 'failed'}
     <div class="status-row" data-testid="hotkey-status" role="status">
       {hotkeyFailedText(palette.hotkeyAccelerator)}
@@ -121,9 +224,7 @@
     onscroll={(event) => palette.setScrollTop(event.currentTarget.scrollTop)}
   >
     {#if palette.total === 0}
-      <div class="empty" data-testid="empty">
-        {palette.mode === 'search' ? NO_RESULTS_TEXT : EMPTY_TEXT}
-      </div>
+      <div class="empty" data-testid="empty">{palette.emptyText}</div>
     {:else}
       <div class="spacer" data-testid="spacer" style="height: {palette.total * ROW_HEIGHT_PX}px">
         {#each palette.visibleRows as row (row.index)}
@@ -138,6 +239,18 @@
                 palette.selectedIndex = row.index
                 palette.pending = palette.recall()
               }}
+              onpin={() => {
+                palette.selectedIndex = row.index
+                palette.pending = palette.togglePin()
+              }}
+              ontag={() => {
+                palette.selectedIndex = row.index
+                palette.openTagging()
+              }}
+              ondelete={() => {
+                palette.selectedIndex = row.index
+                palette.pending = palette.removeSelected()
+              }}
             />
           {:else}
             <div class="row row-placeholder" style="top: {row.top}px; height: {ROW_HEIGHT_PX}px"></div>
@@ -151,10 +264,23 @@
     <Preview text={palette.previewText} mime={palette.previewMime} {filePaths} />
   </div>
 
-  <!-- Pin and delete are keyboard-only, and were completely undiscoverable before this row. -->
+  <!-- Real buttons, not a legend. Pin, tab and delete are all still keyboard shortcuts, and each
+       one is now also something you can click, which is how it becomes discoverable. -->
   <div class="hints" data-testid="hints">
     {#each SHORTCUT_HINTS as hint (hint.keys)}
-      <span class="hint"><kbd>{hint.keys}</kbd> {hint.label}</span>
+      {#if hint.action === null}
+        <span class="hint"><kbd>{hint.keys}</kbd> {hint.label}</span>
+      {:else}
+        <button
+          type="button"
+          class="hint hint-button"
+          disabled={selected === null && hint.action !== 'close'}
+          onmousedown={keepFocus}
+          onclick={() => (palette.pending = palette.run(hint.action))}
+        >
+          <kbd>{hint.keys}</kbd> {hint.label}
+        </button>
+      {/if}
     {/each}
   </div>
 

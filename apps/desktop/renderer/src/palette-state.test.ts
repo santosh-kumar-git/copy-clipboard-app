@@ -1,7 +1,13 @@
-import { TOAST_COPIED_MANUAL, TOAST_COPIED_SECURE_INPUT, createTestClock } from '@cairn/protocol'
+import {
+  TAGS_MAX_PER_ITEM,
+  TOAST_COPIED_MANUAL,
+  TOAST_COPIED_SECURE_INPUT,
+  createTestClock,
+} from '@cairn/protocol'
 import { describe, expect, it } from 'vitest'
 import {
   FETCH_SPAN,
+  MAX_TABS_PER_ITEM,
   PaletteState,
   RECALL_TOAST_TEXT,
   SEARCH_LIMIT,
@@ -11,6 +17,8 @@ import {
   filePathsFromPreview,
   highlightSegments,
   kindChipLabel,
+  sameTab,
+  tabFilter,
   formatBytes,
   rowFallbackLabel,
   nextIndex,
@@ -112,6 +120,19 @@ describe('labels', () => {
     expect(RECALL_TOAST_TEXT['elevated-target']).toBe(TOAST_COPIED_MANUAL)
     expect(RECALL_TOAST_TEXT['secure-input']).toBe(TOAST_COPIED_SECURE_INPUT)
   })
+
+  it('mirrors the per-item tab cap the main process enforces', () => {
+    expect(MAX_TABS_PER_ITEM).toBe(TAGS_MAX_PER_ITEM)
+  })
+
+  it('narrows list and search by the active tab, and by nothing at all on All', () => {
+    expect(tabFilter({ kind: 'all' })).toEqual({ pinnedOnly: false })
+    expect(tabFilter({ kind: 'pinned' })).toEqual({ pinnedOnly: true })
+    expect(tabFilter({ kind: 'tag', tag: 'work' })).toEqual({ pinnedOnly: false, tag: 'work' })
+    expect(sameTab({ kind: 'tag', tag: 'work' }, { kind: 'tag', tag: 'home' })).toBe(false)
+    expect(sameTab({ kind: 'tag', tag: 'work' }, { kind: 'tag', tag: 'work' })).toBe(true)
+    expect(sameTab({ kind: 'all' }, { kind: 'pinned' })).toBe(false)
+  })
 })
 
 describe('PaletteState', () => {
@@ -139,7 +160,9 @@ describe('PaletteState', () => {
     await state.start()
 
     await state.setQuery('wrhs')
-    expect(fake.searchCalls).toEqual([{ q: 'wrhs', limit: SEARCH_LIMIT }])
+    // `pinnedOnly: false` and no `tag`: the All tab narrows by nothing, and a search typed inside a
+    // tab is narrowed to it.
+    expect(fake.searchCalls).toEqual([{ q: 'wrhs', limit: SEARCH_LIMIT, pinnedOnly: false }])
     expect(state.mode).toBe('search')
     expect(state.total).toBe(0)
 

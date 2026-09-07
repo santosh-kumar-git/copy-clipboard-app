@@ -1,4 +1,4 @@
-import type { Cancel, Clock, ItemKind, ItemSummary } from '@cairn/protocol'
+import type { Cancel, Clock, ItemKind, ItemSummary, Tab } from '@cairn/protocol'
 import {
   parseHistoryChanged,
   parseHotkeyStatus,
@@ -20,23 +20,68 @@ export const FETCH_SPAN = 32
 export const SEARCH_LIMIT = 50
 export const TOAST_MS = 2_000
 
+/** What the action bar can do to the selected row. `null` is a hint with no button behind it. */
+export type PaletteAction = 'copy' | 'pin' | 'tab' | 'delete' | 'close'
+
 /**
- * The shortcut hints. Pinning and deleting have worked from day one — Cmd+P and Cmd+Backspace — but
- * nothing anywhere said so, so as far as anyone using the app was concerned the pin feature did not
- * exist. A feature reachable only by reading the source is not shipped.
+ * The action bar. This started life as a row of grey text naming keyboard shortcuts, because pinning
+ * and deleting were keyboard-only and nothing anywhere said so. Naming them was an improvement over
+ * nothing and still left every action unreachable with a mouse, so each of these is now a real
+ * button that both performs the action and shows the key that does it.
+ *
+ * `↑↓` keeps `action: null`: it is genuinely a hint, and a button that moved the selection by one
+ * row would be a scrollbar with extra steps.
  *
  * `⌫` rather than "Backspace" because that is what is printed on the key.
  */
 export const SHORTCUT_HINTS = [
-  { keys: '↑↓', label: 'navigate' },
-  { keys: '⏎', label: 'copy' },
-  { keys: '⌘P', label: 'pin' },
-  { keys: '⌘⌫', label: 'delete' },
-  { keys: 'esc', label: 'close' },
-] as const
+  { keys: '↑↓', label: 'navigate', action: null },
+  { keys: '⏎', label: 'copy', action: 'copy' },
+  { keys: '⌘P', label: 'pin', action: 'pin' },
+  { keys: '⌘T', label: 'tab', action: 'tab' },
+  { keys: '⌘⌫', label: 'delete', action: 'delete' },
+  { keys: 'esc', label: 'close', action: 'close' },
+] as const satisfies readonly { keys: string; label: string; action: PaletteAction | null }[]
+
+/**
+ * Which tab the palette is showing. `pinned` is deliberately its own kind rather than a reserved tag
+ * name: pinning is a retention promise the store enforces, and a tag is not, so a user who created a
+ * tab called "pinned" must not get retention exemption out of it.
+ */
+export type ActiveTab =
+  | { readonly kind: 'all' }
+  | { readonly kind: 'pinned' }
+  | { readonly kind: 'tag'; readonly tag: string }
+
+export const ALL_TAB: ActiveTab = { kind: 'all' }
+export const PINNED_TAB: ActiveTab = { kind: 'pinned' }
+
+export function sameTab(a: ActiveTab, b: ActiveTab): boolean {
+  if (a.kind !== b.kind) return false
+  return a.kind !== 'tag' || b.kind !== 'tag' || a.tag === b.tag
+}
+
+export function tabLabel(t: ActiveTab): string {
+  return t.kind === 'all' ? 'All' : t.kind === 'pinned' ? 'Pinned' : t.tag
+}
+
+/** The `list`/`search` narrowing a tab implies. `all` narrows by nothing. */
+export function tabFilter(t: ActiveTab): { pinnedOnly: boolean; tag?: string } {
+  if (t.kind === 'pinned') return { pinnedOnly: true }
+  if (t.kind === 'tag') return { pinnedOnly: false, tag: t.tag }
+  return { pinnedOnly: false }
+}
 
 export const EMPTY_TEXT = 'Nothing copied yet'
+export const EMPTY_TAB_TEXT = 'Nothing filed under this tab yet — anything you file here is kept'
+export const EMPTY_PINNED_TEXT = 'Nothing pinned yet — pinned copies are never evicted'
 export const NO_RESULTS_TEXT = 'No matches'
+export const TAG_PLACEHOLDER = 'Tab name, then ⏎'
+/** Mirrors `TAGS_MAX_PER_ITEM` in `@cairn/protocol`; asserted equal by palette-state.test.ts, because
+ *  the renderer cannot import that barrel at runtime (it re-exports node:crypto). */
+export const MAX_TABS_PER_ITEM = 8
+export const TAG_LIMIT_TEXT = `An item can be in at most ${String(MAX_TABS_PER_ITEM)} tabs`
+export const TAG_FAILED_TEXT = 'Cairn could not file that into a tab'
 export const SECRET_PIN_REFUSED_TEXT = 'Secrets cannot be pinned — this one expires in 5 minutes'
 export const RECALL_FAILED_TEXT = 'Cairn could not put that on the clipboard'
 export const LOAD_FAILED_TEXT = 'Cairn could not read its history'
@@ -200,6 +245,13 @@ export class PaletteState {
   previewMime: 'text/plain' | 'text/html' = $state('text/plain')
   shownAt = $state(0)
   nowMs = $state(0)
+  /** Every tab that has at least one item, counted over the whole history, not the loaded page. */
+  tabs: Tab[] = $state([])
+  pinnedCount = $state(0)
+  activeTab: ActiveTab = $state(ALL_TAB)
+  /** The inline "file this into a tab" field. Open only while the user is typing a tab name. */
+  tagging = $state(false)
+  tagDraft = $state('')
   /** At most FETCH_SPAN summaries — the renderer never holds the whole history. */
   rows: (ItemSummary | null)[] = $state([])
   rowsOffset = $state(0)
@@ -234,6 +286,14 @@ export class PaletteState {
 
   get selectedItem(): ItemSummary | null {
     return this.rowAt(this.selectedIndex)
+  }
+
+  /** What the empty list should say, which depends entirely on WHY it is empty. */
+  get emptyText(): string {
+    if (this.mode === 'search') return NO_RESULTS_TEXT
+    if (this.activeTab.kind === 'pinned') return EMPTY_PINNED_TEXT
+    if (this.activeTab.kind === 'tag') return EMPTY_TAB_TEXT
+    return EMPTY_TEXT
   }
 
   get loadedRowCount(): number {
@@ -275,6 +335,10 @@ export class PaletteState {
         this.selectedIndex = 0
         this.windowStart = 0
         this.toast = null
+        // The tab resets with the query, for the same reason: the palette is opened to find the thing
+        // you just copied far more often than to return to a tab you were in an hour ago.
+        this.activeTab = ALL_TAB
+        this.closeTagging()
         this.pending = this.reload()
       }),
     )
@@ -308,12 +372,14 @@ export class PaletteState {
     this.mode = 'search'
     const seq = ++this.#listSeq
     try {
-      const res = await this.#deps.api.search({ q, limit: SEARCH_LIMIT })
+      const res = await this.#deps.api.search({ q, limit: SEARCH_LIMIT, ...tabFilter(this.activeTab) })
       if (seq !== this.#listSeq) return
       this.rows = res.results.map((r) => r.item)
       this.rangesByIndex = res.results.map((r) => [...r.ranges])
       this.rowsOffset = 0
       this.total = res.results.length
+      this.tabs = [...res.tabs]
+      this.pinnedCount = res.pinnedCount
       this.statusText = null
     } catch {
       if (seq !== this.#listSeq) return
@@ -344,11 +410,19 @@ export class PaletteState {
   async #fetchWindow(offset: number): Promise<void> {
     const seq = ++this.#listSeq
     try {
-      const res = await this.#deps.api.list({ limit: FETCH_SPAN, offset, pinnedOnly: false })
+      const res = await this.#deps.api.list({
+        limit: FETCH_SPAN,
+        offset,
+        ...tabFilter(this.activeTab),
+      })
       if (seq !== this.#listSeq) return
       this.rows = [...res.items]
       this.rowsOffset = offset
       this.total = res.total
+      // Always from the list reply, never accumulated: a tab that just lost its last item has to
+      // disappear from the bar in the same frame the row disappears from the list.
+      this.tabs = [...res.tabs]
+      this.pinnedCount = res.pinnedCount
       this.rangesByIndex = []
       this.statusText = null
       if (this.selectedIndex >= this.total) this.selectedIndex = Math.max(0, this.total - 1)
@@ -411,7 +485,90 @@ export class PaletteState {
       this.#showToast({ text: LOAD_FAILED_TEXT, tone: 'warn' })
       return
     }
+    await this.refresh()
+  }
+
+  /** Switching tabs keeps the query, so "everything matching `invoice` in Work" is one click. */
+  async selectTab(tab: ActiveTab): Promise<void> {
+    if (sameTab(tab, this.activeTab)) return
+    this.activeTab = tab
+    this.selectedIndex = 0
+    this.windowStart = 0
+    this.closeTagging()
+    if (this.mode === 'search' && this.query.trim().length > 0) {
+      await this.setQuery(this.query)
+      return
+    }
     await this.reload()
+  }
+
+  /** Opens the tab-name field for the selected row. There is no separate "create a tab" step: a tab
+   *  exists because an item is in it, so typing a new name here is what creates one. */
+  openTagging(): void {
+    if (this.selectedItem === null) return
+    this.tagging = true
+    this.tagDraft = ''
+  }
+
+  closeTagging(): void {
+    this.tagging = false
+    this.tagDraft = ''
+  }
+
+  async commitTag(): Promise<void> {
+    const item = this.selectedItem
+    const draft = this.tagDraft
+    if (item === null || draft.trim().length === 0) {
+      this.closeTagging()
+      return
+    }
+    this.closeTagging()
+    await this.#applyTag(item.id, draft, true)
+  }
+
+  /** Takes the selected item out of one tab. The chip's ✕ and nothing else calls this. */
+  async untag(tag: string): Promise<void> {
+    const item = this.selectedItem
+    if (item === null) return
+    await this.#applyTag(item.id, tag, false)
+  }
+
+  async #applyTag(id: string, tag: string, tagged: boolean): Promise<void> {
+    try {
+      await this.#deps.api.tag({ id, tag, tagged })
+    } catch (e) {
+      const code = e instanceof Error ? e.message : ''
+      this.#showToast({ text: code === 'E_TAG_LIMIT' ? TAG_LIMIT_TEXT : TAG_FAILED_TEXT, tone: 'warn' })
+      return
+    }
+    await this.refresh()
+  }
+
+  /** Re-runs whichever view is on screen. A tab change and a tag change both need this, and doing it
+   *  with `reload()` alone silently dropped the user's query. */
+  async refresh(): Promise<void> {
+    if (this.mode === 'search' && this.query.trim().length > 0) {
+      await this.setQuery(this.query)
+      return
+    }
+    await this.reload()
+  }
+
+  /** The action bar's one entry point, so a button and its keyboard shortcut cannot drift apart. */
+  run(action: PaletteAction): Promise<void> {
+    switch (action) {
+      case 'copy':
+        return this.recall()
+      case 'pin':
+        return this.togglePin()
+      case 'tab':
+        this.openTagging()
+        return Promise.resolve()
+      case 'delete':
+        return this.removeSelected()
+      case 'close':
+        return this.close()
+    }
   }
 
   async removeSelected(): Promise<void> {
@@ -423,7 +580,7 @@ export class PaletteState {
       this.#showToast({ text: LOAD_FAILED_TEXT, tone: 'warn' })
       return
     }
-    await this.reload()
+    await this.refresh()
   }
 
   async close(): Promise<void> {

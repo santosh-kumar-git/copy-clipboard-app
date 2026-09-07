@@ -39,10 +39,23 @@ export function isSyncableDelete(reason: DeleteReason): boolean {
 }
 
 /**
+ * Kept regardless of age, count and byte limits. Two ways in, and they mean the same thing — the user
+ * said this one matters:
+ *  - `pinned`, said directly;
+ *  - in at least one tab, said by filing it somewhere. A tab whose contents quietly evaporated at the
+ *    500th copy would be a folder that loses your files, so being in a tab is a keep, not a view.
+ *
+ * NOT an exemption from the secret TTL, which nothing overrides.
+ */
+export function isKept(item: Item): boolean {
+  return item.pinned || (item.tags?.length ?? 0) > 0
+}
+
+/**
  * Pure. Applies all four limits — whichever bites first — and returns each doomed id exactly once,
- * with the reason of the first limit that condemned it. Pinned items are exempt from every limit
- * and their bytes do not count towards the budget. Sorting happens inside, so the caller may pass
- * items in any order and get the same answer.
+ * with the reason of the first limit that condemned it. Kept items (`isKept`) are exempt from every
+ * limit and their bytes do not count towards the budget. Sorting happens inside, so the caller may
+ * pass items in any order and get the same answer.
  */
 export function planEviction(
   items: readonly Item[],
@@ -63,7 +76,7 @@ export function planEviction(
   )
 
   // 1. Secret TTL. Deliberately first, and NOT exempted by `pinned`: a secret can never be pinned
-  //    (`isPinnable` refuses it), so a pinned secret would mean a bug upstream, and expiring it is
+  //    (`isPinnable` refuses it), so a kept secret would mean a bug upstream, and expiring it is
   //    the safe reading. Note this reads `it.expiresAt` and NOT `limits.secretTtlMs`: the TTL is
   //    applied once, at ingest, by `@cairn/privacy`'s `secretExpiresAt`, and stamped into the item.
   //    `limits.secretTtlMs` records the value that stamp was made with — it is not re-applied here,
@@ -74,7 +87,7 @@ export function planEviction(
   }
   // 2. Age.
   for (const it of newestFirst) {
-    if (it.pinned || doomed.has(it.id)) continue
+    if (isKept(it) || doomed.has(it.id)) continue
     if (limits.maxAgeMs !== null && nowMs - it.createdAt >= limits.maxAgeMs) {
       condemn(it, 'retention-age')
     }
@@ -82,14 +95,14 @@ export function planEviction(
   // 3. Count.
   let kept = 0
   for (const it of newestFirst) {
-    if (it.pinned || doomed.has(it.id)) continue
+    if (isKept(it) || doomed.has(it.id)) continue
     kept += 1
     if (kept > limits.maxItems) condemn(it, 'retention-count')
   }
   // 4. Bytes.
   let bytes = 0
   for (const it of newestFirst) {
-    if (it.pinned || doomed.has(it.id)) continue
+    if (isKept(it) || doomed.has(it.id)) continue
     bytes += it.byteLength
     if (bytes > limits.maxBytes) condemn(it, 'retention-bytes')
   }

@@ -6,6 +6,7 @@ interface EntrySpec {
   readonly id: string
   readonly preview: string
   readonly pinned?: boolean
+  readonly tagged?: boolean
   readonly updatedAt?: number
   readonly ord?: number
 }
@@ -14,6 +15,7 @@ const e = (o: EntrySpec): SearchEntry => ({
   id: o.id as ItemId,
   preview: o.preview,
   pinned: o.pinned ?? false,
+  tagged: o.tagged ?? false,
   updatedAt: o.updatedAt ?? 1_000,
   ord: o.ord ?? 1,
 })
@@ -60,13 +62,15 @@ describe('createSearchIndex — matching', () => {
 })
 
 describe('createSearchIndex — ordering and lifecycle', () => {
-  it('an empty query is pinned first, then recency', () => {
+  // Recency ONLY. Pinned entries used to sort first here; that made a pin from last week outrank
+  // something copied ten seconds ago, and the palette's Pinned tab is the honest place for that.
+  it('an empty query is newest-first, with a pin holding its place in the timeline', () => {
     const ix = createSearchIndex()
     ix.add(e({ id: 'OLD', preview: 'old', updatedAt: 100, ord: 1 }))
     ix.add(e({ id: 'NEW', preview: 'new', updatedAt: 300, ord: 3 }))
     ix.add(e({ id: 'PIN', preview: 'pinned', updatedAt: 200, ord: 2, pinned: true }))
-    expect(ix.query('', 10).map((h) => String(h.id))).toEqual(['PIN', 'NEW', 'OLD'])
-    expect(ix.query('   ', 10).map((h) => String(h.id))).toEqual(['PIN', 'NEW', 'OLD'])
+    expect(ix.query('', 10).map((h) => String(h.id))).toEqual(['NEW', 'PIN', 'OLD'])
+    expect(ix.query('   ', 10).map((h) => String(h.id))).toEqual(['NEW', 'PIN', 'OLD'])
     expect(ix.query('', 10).map((h) => h.ranges)).toEqual([[], [], []])
   })
 
@@ -126,7 +130,16 @@ describe('createSearchIndex — ordering and lifecycle', () => {
     ix.add(e({ id: 'A', preview: 'aaa', updatedAt: 2, ord: 2 }))
     ix.add(e({ id: 'B', preview: 'bbb', updatedAt: 3, ord: 3 }))
     expect(ix.size).toBe(2)
-    expect(ix.query('', 10).map((h) => String(h.id))).toEqual(['P', 'B'])
+    // `pinned` still means "never dropped" — it just no longer means "shown first".
+    expect(ix.query('', 10).map((h) => String(h.id))).toEqual(['B', 'P'])
+  })
+
+  it('an entry filed into a tab is exempt from overflow eviction too', () => {
+    const ix = createSearchIndex({ limit: 2 })
+    ix.add(e({ id: 'T', preview: 'filed old', updatedAt: 1, ord: 1, tagged: true }))
+    ix.add(e({ id: 'A', preview: 'aaa', updatedAt: 2, ord: 2 }))
+    ix.add(e({ id: 'B', preview: 'bbb', updatedAt: 3, ord: 3 }))
+    expect(ix.query('', 10).map((h) => String(h.id))).toEqual(['B', 'T'])
   })
 
   it('clamps a silly limit to the hard cap and rejects a zero limit', () => {

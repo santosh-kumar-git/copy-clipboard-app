@@ -1,4 +1,4 @@
-import { RETENTION_MAX_AGE_MS, SECRET_TTL_MS, contentHash as hashOf, createTestClock, type Candidate, type ItemId, type Logger, type ResolvedRep } from '@cairn/protocol'
+import { RETENTION_MAX_AGE_MS, SECRET_TTL_MS, TAGS_MAX_PER_ITEM, contentHash as hashOf, createTestClock, type Candidate, type ItemId, type Logger, type ResolvedRep } from '@cairn/protocol'
 import { DEFAULT_RULES, classify, mask } from '@cairn/privacy'
 import { openStore, randomTestKey, tempStoreDir } from '@cairn/store'
 import { createSearchIndex } from '@cairn/search'
@@ -21,7 +21,10 @@ describe('quit and relaunch', () => {
     const loaded = await second.load()
     expect(loaded.ok && loaded.value.items).toBe(2)
     expect(second.list()).toEqual(before)
-    expect(second.list().items[0]!.pinned).toBe(true)
+    // Still the OLDER row, still pinned: pinning changes how long an item lives, not where it sits
+    // in the timeline, so it does not jump to the top.
+    expect(second.list().items[1]!.id).toBe(pinTarget)
+    expect(second.list().items[1]!.pinned).toBe(true)
     expect(second.search('wrhs', 10).map((s) => s.item.id)).toEqual([pinTarget])
     expect(second.list().items.map((i) => i.id)).toEqual(before.items.map((i) => i.id))
   })
@@ -242,5 +245,132 @@ describe('evictPreviewCache — the only thing that bounds the decrypted-preview
     const reps = await hist.resolveReps(r.value.item.id)
     expect(reps.ok).toBe(true)
     if (reps.ok) expect(new TextDecoder().decode(reps.value[0]!.bytes)).toBe('still here')
+  })
+})
+
+describe('tabs', () => {
+  const added = async (hist: History, text: string, at: number): Promise<ItemId> => {
+    const r = await hist.ingest(textCandidate(text, at))
+    if (!r.ok || r.value.outcome !== 'added') throw new Error('expected outcome "added"')
+    return r.value.item.id
+  }
+
+  it('a tab exists because an item carries its name, and stops existing when none does', async () => {
+    const { mk, clock } = harness()
+    const hist = mk()
+    const a = await added(hist, 'invoice draft', clock.now())
+    clock.advance(1_000)
+    const b = await added(hist, 'meeting notes', clock.now())
+
+    expect(hist.tabs()).toEqual([])
+
+    expect((await hist.tag(a, '  Work  ', true)).ok).toBe(true)
+    expect((await hist.tag(b, 'work', true)).ok).toBe(true)
+    // One tab, not two: `  Work  ` and `work` normalise to the same name rather than making a second
+    // tab that looks identical in the tab bar.
+    expect(hist.tabs()).toEqual([{ tag: 'work', count: 2 }])
+    expect(hist.list({ tag: 'work' }).total).toBe(2)
+    expect(hist.list({ tag: 'nope' }).total).toBe(0)
+
+    expect((await hist.tag(a, 'WORK', false)).ok).toBe(true)
+    expect((await hist.tag(b, 'work', false)).ok).toBe(true)
+    expect(hist.tabs()).toEqual([])
+  })
+
+  it('filing into a tab does not move the item in the timeline', async () => {
+    const { mk, clock } = harness()
+    const hist = mk()
+    const older = await added(hist, 'older thing', clock.now())
+    clock.advance(1_000)
+    await added(hist, 'newer thing', clock.now())
+    clock.advance(1_000)
+
+    await hist.tag(older, 'work', true)
+
+    expect(hist.list().items.map((i) => i.preview)).toEqual(['newer thing', 'older thing'])
+  })
+
+  it('survives a restart, and an old record with no tags at all reads as no tabs', async () => {
+    const { mk, clock } = harness()
+    const first = mk()
+    const id = await added(first, 'tag me', clock.now())
+    await first.tag(id, 'work', true)
+
+    const second = mk()
+    expect((await second.load()).ok).toBe(true)
+    expect(second.get(id)!.tags).toEqual(['work'])
+    expect(second.tabs()).toEqual([{ tag: 'work', count: 1 }])
+  })
+
+  it('refuses a ninth tab and an empty name, and is a no-op when nothing changes', async () => {
+    const { mk, clock } = harness()
+    const hist = mk()
+    const id = await added(hist, 'many tabs', clock.now())
+    for (let i = 0; i < TAGS_MAX_PER_ITEM; i++) {
+      expect((await hist.tag(id, `tab${String(i)}`, true)).ok).toBe(true)
+    }
+    const ninth = await hist.tag(id, 'one too many', true)
+    expect(ninth.ok).toBe(false)
+    if (!ninth.ok) expect(ninth.code).toBe('E_TAG_LIMIT')
+
+    const blank = await hist.tag(id, '   ', true)
+    expect(blank.ok).toBe(false)
+    if (!blank.ok) expect(blank.code).toBe('E_TAG_INVALID')
+
+    // Already in tab0: allowed, and returns the tags unchanged rather than erroring.
+    const again = await hist.tag(id, 'tab0', true)
+    expect(again.ok && again.value.tags.length).toBe(TAGS_MAX_PER_ITEM)
+  })
+
+  it('being in a tab keeps an item past the count limit, exactly as pinning does', async () => {
+    const { mk, clock } = harness({ ...DEFAULT_RETENTION, maxItems: 2 })
+    const hist = mk()
+    const filed = await added(hist, 'filed but unpinned', clock.now())
+    clock.advance(1_000)
+    const pinned = await added(hist, 'pinned', clock.now())
+    clock.advance(1_000)
+    const ordinary = await added(hist, 'ordinary', clock.now())
+    await hist.tag(filed, 'work', true)
+    expect((await hist.pin(pinned, true)).ok).toBe(true)
+
+    for (const text of ['newer 1', 'newer 2', 'newer 3']) {
+      clock.advance(1_000)
+      await added(hist, text, clock.now())
+    }
+    await hist.evictNow()
+
+    expect(hist.get(pinned)).toBeDefined()
+    expect(hist.get(filed)).toBeDefined()
+    expect(hist.get(ordinary)).toBeUndefined()
+    expect(hist.tabs()).toEqual([{ tag: 'work', count: 1 }])
+  })
+
+  it('taking an item out of its last tab re-exposes it to retention', async () => {
+    const { mk, clock } = harness({ ...DEFAULT_RETENTION, maxItems: 1 })
+    const hist = mk()
+    const filed = await added(hist, 'filed', clock.now())
+    await hist.tag(filed, 'work', true)
+    clock.advance(1_000)
+    await added(hist, 'newer', clock.now())
+    await hist.evictNow()
+    expect(hist.get(filed)).toBeDefined()
+
+    expect((await hist.tag(filed, 'work', false)).ok).toBe(true)
+    await hist.evictNow()
+
+    expect(hist.get(filed)).toBeUndefined()
+  })
+
+  it('a search typed inside a tab is narrowed to that tab', async () => {
+    const { mk, clock } = harness()
+    const hist = mk()
+    const a = await added(hist, 'warehouse inventory report', clock.now())
+    clock.advance(1_000)
+    await added(hist, 'warehouse shipping report', clock.now())
+    await hist.tag(a, 'work', true)
+
+    expect(hist.search('wrhs', 10)).toHaveLength(2)
+    expect(hist.search('wrhs', 10, { tag: 'work' }).map((s) => s.item.id)).toEqual([a])
+    expect(hist.search('wrhs', 10, { pinnedOnly: true })).toHaveLength(0)
   })
 })

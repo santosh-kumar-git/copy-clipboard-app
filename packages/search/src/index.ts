@@ -6,6 +6,8 @@ export interface SearchEntry {
   /** ALREADY MASKED. `@cairn/history` masks at ingest, so a raw secret can never reach here. */
   readonly preview: string
   readonly pinned: boolean
+  /** In at least one tab. Exempt from overflow eviction for the same reason `pinned` is. */
+  readonly tagged: boolean
   readonly updatedAt: number
   /** The store `seq` of the item's ITEM_ADDED record: a restart-identical recency tiebreak. */
   readonly ord: number
@@ -53,20 +55,23 @@ export function createSearchIndex(opts: { limit?: number } = {}): SearchIndex {
   let dirty = true
 
   const byRecency = (a: SearchEntry, b: SearchEntry): number => b.updatedAt - a.updatedAt || b.ord - a.ord
-  const byPinnedThenRecency = (a: SearchEntry, b: SearchEntry): number =>
-    Number(b.pinned) - Number(a.pinned) || byRecency(a, b)
 
   function rebuild(): void {
     if (!dirty) return
-    ordered = [...entries.values()].sort(byPinnedThenRecency)
+    // Recency only. Pinned entries used to sort first, which put a pin from last week above the thing
+    // you copied ten seconds ago and made the one list people read lie about time. `pinned` is still
+    // read — by evictOverflow, where it means "never drop this", which is a promise rather than a
+    // ranking. The Pinned tab is where "show me only these" lives now.
+    ordered = [...entries.values()].sort(byRecency)
     dirty = false
   }
 
   function evictOverflow(): void {
     if (entries.size <= capacity) return
-    // Oldest first: negate the newest-first comparator. Pinned rows are exempt (spec §4).
+    // Oldest first: negate the newest-first comparator. Pinned and filed rows are exempt (spec §4),
+    // and for the same reason retention exempts them: the user said this one matters.
     const unpinnedOldestFirst = [...entries.values()]
-      .filter((en) => !en.pinned)
+      .filter((en) => !en.pinned && !en.tagged)
       .sort((a, b) => -byRecency(a, b))
     let over = entries.size - capacity
     for (const en of unpinnedOldestFirst) {

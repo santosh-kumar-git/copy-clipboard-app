@@ -20,6 +20,7 @@ const itemWith = (flags: readonly Flag[]): Item => ({
   createdAt: 1_767_225_600_000,
   updatedAt: 1_767_225_600_000,
   pinned: false,
+  tags: [],
   expiresAt: null,
 })
 

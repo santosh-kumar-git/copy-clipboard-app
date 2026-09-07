@@ -53,6 +53,7 @@ const item = (over: Partial<Item> = {}): Item => ({
   createdAt: 1_767_225_600_000,
   updatedAt: 1_767_225_600_000,
   pinned: false,
+  tags: [],
   expiresAt: 1_767_225_900_000,
   ...over,
 })
@@ -110,6 +111,12 @@ function harness(over: { historyItems?: readonly Item[] } = {}): Harness {
         ? err('E_PIN_REFUSED_SECRET', 'secret-flagged items cannot be pinned')
         : ok({ pinned })
     },
+    tag: async (id: ItemId, tag: string, tagged: boolean) => {
+      domainCalls.push(`tag ${id} ${tag} ${String(tagged)}`)
+      return ok({ tags: tagged ? [tag] : [] })
+    },
+    tabs: () => [{ tag: 'work', count: 1 }],
+    pinnedCount: () => 0,
     remove: async (id: ItemId) => { domainCalls.push(`remove ${id}`); return ok({ removed: true }) },
     evictNow: async () => ok({ evicted: 0 }),
     evictPreviewCache: () => {},
@@ -358,7 +365,7 @@ describe('toItemSummary', () => {
     const summary = toItemSummary(item(), null) as unknown as Record<string, unknown>
     expect(Object.keys(summary).sort()).toEqual([
       'byteLength', 'createdAt', 'expiresAt', 'flags', 'id', 'kind', 'maskedSpanCount', 'pinned',
-      'preview', 'previewTruncated', 'sourceAppName', 'thumbnailDataUrl',
+      'preview', 'previewTruncated', 'sourceAppName', 'tags', 'thumbnailDataUrl',
     ])
   })
 

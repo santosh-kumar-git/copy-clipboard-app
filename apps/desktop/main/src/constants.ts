@@ -1,8 +1,15 @@
 import { DEFAULT_ACCELERATOR } from '@cairn/protocol'
 
-/** Spotlight-ish proportions. Fixed, because a resizable palette is a palette you have to aim at. */
+/**
+ * Spotlight-ish proportions. Fixed, because a resizable palette is a palette you have to aim at.
+ *
+ * The height is the SUM of the palette's fixed rows, not a round number: 460 was shorter than the
+ * layout it contained, so the window clipped the bottom of itself — the preview pane showed one line
+ * of whatever you had copied and the action bar was sliced in half. The tally is
+ * 16 padding + 43 search + 32 tab bar + 8*44 rows + 165 preview + 36 action bar = 644, rounded up.
+ */
 export const PALETTE_WIDTH = 720
-export const PALETTE_HEIGHT = 460
+export const PALETTE_HEIGHT = 648
 
 /** Spec §11 control 6: the decrypted preview cache is evicted after this much user idleness. */
 export const PREVIEW_CACHE_IDLE_MS = 300_000

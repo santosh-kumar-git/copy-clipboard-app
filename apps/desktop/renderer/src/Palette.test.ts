@@ -290,11 +290,17 @@ describe('the props shape', () => {
       top: true,
       nowMs: true,
       onpick: true,
+      onpin: true,
+      ontag: true,
+      ondelete: true,
     }
     expect(Object.keys(propKeys).sort()).toEqual([
       'item',
       'nowMs',
+      'ondelete',
       'onpick',
+      'onpin',
+      'ontag',
       'ranges',
       'selected',
       'top',
@@ -302,7 +308,7 @@ describe('the props shape', () => {
   })
 })
 
-describe('the shortcut hints', () => {
+describe('the action bar', () => {
   // Pin (Cmd+P) and delete (Cmd+Backspace) have always worked and were never mentioned anywhere, so
   // in practice the pin feature did not exist for anyone who had not read the source.
   it('names pin and delete, which are reachable no other way', async () => {
@@ -319,7 +325,106 @@ describe('the shortcut hints', () => {
   it('names every shortcut the palette actually handles', () => {
     // Guards the drift that makes hints worse than none: a key handled but not listed, or listed but
     // no longer handled.
-    const handled = ['↑↓', '⏎', '⌘P', '⌘⌫', 'esc']
+    const handled = ['↑↓', '⏎', '⌘P', '⌘T', '⌘⌫', 'esc']
     expect(SHORTCUT_HINTS.map((h) => h.keys)).toEqual(handled)
+  })
+
+  it('is buttons, not a legend — clicking pin pins the selected row', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    const state = await render(fake)
+    const pin = [...host.querySelectorAll<HTMLButtonElement>('[data-testid="hints"] button')].find(
+      (b) => b.textContent?.includes('pin'),
+    )
+    expect(pin).toBeDefined()
+
+    pin?.click()
+    await state.pending
+    flushSync()
+
+    expect(fake.pinCalls).toEqual([{ id: testItemId(0), pinned: true }])
+  })
+
+  it('offers a button per row action so nothing is keyboard-only', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+    const buttons = [...rows()[1]!.querySelectorAll<HTMLButtonElement>('.row-btn')]
+    expect(buttons.length).toBe(3)
+
+    buttons[2]?.click()
+    await state.pending
+    flushSync()
+
+    // The click also moved the selection onto the row it acted on, so the two can never disagree.
+    expect(fake.removeCalls).toEqual([testItemId(1)])
+  })
+})
+
+describe('tabs', () => {
+  it('always offers All and Pinned, and one tab per tag in use', async () => {
+    const fake = createFakeApi({
+      items: [makeItem(0, { tags: ['work'] }), makeItem(1, { pinned: true }), makeItem(2)],
+    })
+    await render(fake)
+
+    const labels = [...host.querySelectorAll('[data-testid="tabs"] .tab')].map((b) =>
+      (b.textContent ?? '').trim(),
+    )
+    expect(labels).toEqual(['All', 'Pinned1', 'work1', '+ Tab'])
+  })
+
+  it('shows only that tab’s items when a tab is clicked, and says so when it is empty', async () => {
+    const fake = createFakeApi({
+      items: [makeItem(0, { tags: ['work'] }), makeItem(1), makeItem(2)],
+    })
+    const state = await render(fake)
+    expect(state.total).toBe(3)
+
+    await state.selectTab({ kind: 'tag', tag: 'work' })
+    flushSync()
+
+    expect(state.total).toBe(1)
+    expect(fake.listCalls.at(-1)).toEqual({ limit: 32, offset: 0, pinnedOnly: false, tag: 'work' })
+
+    await state.selectTab({ kind: 'pinned' })
+    flushSync()
+
+    expect(state.total).toBe(0)
+    expect(host.querySelector('[data-testid="empty"]')?.textContent?.trim()).toBe(
+      'Nothing pinned yet — pinned copies are never evicted',
+    )
+  })
+
+  it('files the selected copy into a new tab from the tab field, which is what creates the tab', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+
+    press('t', { metaKey: true })
+    flushSync()
+    const field = host.querySelector<HTMLInputElement>('[data-testid="tag-input"]')
+    expect(field).not.toBeNull()
+
+    state.tagDraft = ' Work  Notes '
+    await state.commitTag()
+    flushSync()
+
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: ' Work  Notes ', tagged: true }])
+    // The tab bar grew a tab because an item now carries the name: there is no separate registry.
+    expect(state.tabs).toEqual([{ tag: 'work notes', count: 1 }])
+    expect(host.querySelector('[data-testid="tag-input"]')).toBe(null)
+  })
+
+  it('says why when an item is already in as many tabs as it can be', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    fake.failTagWith = 'E_TAG_LIMIT'
+    const state = await render(fake)
+
+    state.openTagging()
+    state.tagDraft = 'ninth'
+    await state.commitTag()
+    flushSync()
+
+    expect(host.querySelector('[data-testid="toast"]')?.textContent).toBe(
+      'An item can be in at most 8 tabs',
+    )
   })
 })

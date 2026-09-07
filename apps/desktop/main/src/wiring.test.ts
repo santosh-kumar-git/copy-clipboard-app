@@ -200,7 +200,7 @@ describe('start', () => {
     expect(r).toEqual({ ok: true, value: { accelerator: 'Cmd+Shift+V', hotkeyStatus: 'active' } })
     expect(h.captureCalls).toEqual(['start'])
     expect(h.agentRequests.map((q) => q.method)).toContain('hotkey.register')
-    expect(h.registered.size).toBe(8)
+    expect(h.registered.size).toBe(9)
   })
 
   it('tells the renderer the hotkey status', async () => {
@@ -260,7 +260,7 @@ describe('start', () => {
     await h.app.start()
 
     expect(channelsWhenDialogOpened).toContain('cairn:history.list')
-    expect(channelsWhenDialogOpened).toHaveLength(8)
+    expect(channelsWhenDialogOpened).toHaveLength(9)
     // Sanity: the dialog really does open after the slow startup work, so the race was real and
     // this test would have caught it rather than passing for the wrong reason.
     expect(agentStartedFirst).toBe(true)

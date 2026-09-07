@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto'
 import {
   PREVIEW_MAX_CHARS,
+  TABS_MAX,
+  TAGS_MAX_PER_ITEM,
   contentHash,
   err,
   newItemId,
+  normalizeTag,
   ok,
   type BlobId,
   type Candidate,
@@ -21,6 +24,7 @@ import {
   type Result,
   type ScoredItem,
   type Snapshot,
+  type Tab,
   type Unsub,
 } from '@cairn/protocol'
 // The 5-minute TTL rule lives in ONE place, and it is not this file. `isPinnable` joins it in Step 36.
@@ -51,10 +55,17 @@ export interface ListQuery {
   readonly offset?: number
   readonly kind?: ItemKind
   readonly pinnedOnly?: boolean
+  /** Restrict to one tab. Normalised here, so a caller may pass what the user typed. */
+  readonly tag?: string
 }
 export interface ListResult {
   readonly items: readonly Item[]
   readonly total: number
+}
+/** What `search` may be narrowed by, so a query typed inside a tab searches that tab. */
+export interface SearchFilter {
+  readonly pinnedOnly?: boolean
+  readonly tag?: string
 }
 export type ChangeReason = 'ingest' | 'update' | 'delete' | 'evict'
 export type IngestOutcome =
@@ -66,9 +77,19 @@ export interface History {
   load(): Promise<Result<{ items: number }>>
   ingest(candidate: Candidate): Promise<Result<IngestOutcome>>
   list(q?: ListQuery): ListResult
-  search(q: string, limit: number): readonly ScoredItem[]
+  search(q: string, limit: number, filter?: SearchFilter): readonly ScoredItem[]
   resolveReps(id: ItemId): Promise<Result<readonly ResolvedRep[]>>
   pin(id: ItemId, pinned: boolean): Promise<Result<{ pinned: boolean }>>
+  /**
+   * Adds or removes one tab name on one item. Creating a tab and filling it are the same act: there
+   * is no registry to add to, so `tabs()` grows the moment the first item carries the name and
+   * shrinks again when the last one stops.
+   */
+  tag(id: ItemId, tag: string, tagged: boolean): Promise<Result<{ tags: readonly string[] }>>
+  /** Every tab that currently has at least one live item, alphabetical, capped at TABS_MAX. */
+  tabs(): readonly Tab[]
+  /** How many live items are pinned — the Pinned tab's count. */
+  pinnedCount(): number
   remove(id: ItemId): Promise<Result<{ removed: boolean }>>
   evictNow(): Promise<Result<{ evicted: number }>>
   evictPreviewCache(): void
@@ -102,6 +123,42 @@ export function primaryRep(reps: readonly ResolvedRep[]): ResolvedRep | undefine
   return reps[0]
 }
 
+/** `''` — what a whitespace-only tab name normalises to — means "no filter", not "no matches". */
+export function filterByTag(items: readonly Item[], tag: string | undefined): Item[] {
+  const wanted = tag === undefined ? '' : normalizeTag(tag)
+  if (wanted === '') return [...items]
+  return items.filter((it) => it.tags.includes(wanted))
+}
+
+/**
+ * Adds or removes one tab name. Pure, so the cap and the dedupe are testable without a store.
+ * Three distinct answers, because the caller has to tell them apart:
+ *  - `'invalid'`  the name normalises to nothing;
+ *  - `'at-limit'` the item already carries TAGS_MAX_PER_ITEM tags. Refused loudly rather than
+ *                 silently dropping the oldest: a tab the user asked for that quietly did not
+ *                 happen is worse than being told no.
+ *  - `'unchanged'` already in the requested state, so `tag()` writes no store record.
+ */
+export type ApplyTagOutcome =
+  | { readonly kind: 'changed'; readonly tags: readonly string[] }
+  | { readonly kind: 'unchanged' }
+  | { readonly kind: 'invalid' }
+  | { readonly kind: 'at-limit' }
+
+export function applyTag(
+  current: readonly string[],
+  rawTag: string,
+  tagged: boolean,
+): ApplyTagOutcome {
+  const tag = normalizeTag(rawTag)
+  if (tag === '') return { kind: 'invalid' }
+  const has = current.includes(tag)
+  if (tagged === has) return { kind: 'unchanged' }
+  if (!tagged) return { kind: 'changed', tags: current.filter((t) => t !== tag) }
+  if (current.length >= TAGS_MAX_PER_ITEM) return { kind: 'at-limit' }
+  return { kind: 'changed', tags: [...current, tag].sort() }
+}
+
 /** One palette row is one line, so runs of whitespace collapse before the 512-char cut. */
 export function truncatePreview(text: string): { preview: string; previewTruncated: boolean } {
   const oneLine = text.replace(/\s+/g, ' ').trim()
@@ -131,6 +188,7 @@ export function createHistory(deps: HistoryDeps): History {
       id: it.id,
       preview: it.preview,
       pinned: it.pinned,
+      tagged: (it.tags?.length ?? 0) > 0,
       updatedAt: it.updatedAt,
       ord: ord.get(it.id) ?? 0,
     })
@@ -143,6 +201,8 @@ export function createHistory(deps: HistoryDeps): History {
     if (it !== undefined && byHash.get(it.contentHash) === id) byHash.delete(it.contentHash)
   }
   const isLive = (it: Item, nowMs: number): boolean => it.expiresAt === null || nowMs < it.expiresAt
+  /** Records written before tabs existed have no `tags` key, so every read normalises it. */
+  const withTags = (it: Item): Item => (Array.isArray(it.tags) ? it : { ...it, tags: [] })
 
   return {
     async load() {
@@ -154,11 +214,11 @@ export function createHistory(deps: HistoryDeps): History {
         if (!rec.ok) return rec
         const ev = rec.value
         if (ev.kind === 'ITEM_ADDED') {
-          items.set(ev.item.id, ev.item)
+          items.set(ev.item.id, withTags(ev.item))
           ord.set(ev.item.id, ev.seq)
         } else if (ev.kind === 'ITEM_UPDATED') {
           const cur = items.get(ev.id)
-          if (cur !== undefined) items.set(ev.id, { ...cur, ...ev.patch })
+          if (cur !== undefined) items.set(ev.id, withTags({ ...cur, ...ev.patch }))
         } else if (ev.kind === 'ITEM_DELETED') {
           items.delete(ev.id)
           ord.delete(ev.id)
@@ -240,6 +300,7 @@ export function createHistory(deps: HistoryDeps): History {
         createdAt: now,
         updatedAt: now,
         pinned: false,
+        tags: [],
         // `now + SECRET_TTL_MS` inlined here would be a second copy of the 5-minute rule. Task 7's
         // predicate returns null for every non-secret flag set, which is the whole contract.
         expiresAt: secretExpiresAt(now, verdict.flags),
@@ -266,19 +327,27 @@ export function createHistory(deps: HistoryDeps): History {
       let live = [...items.values()].filter((it) => isLive(it, now))
       if (q.pinnedOnly === true) live = live.filter((it) => it.pinned)
       if (q.kind !== undefined) live = live.filter((it) => it.kind === q.kind)
-      live.sort((a, b) => Number(b.pinned) - Number(a.pinned) || recency(a, b))
+      live = filterByTag(live, q.tag)
+      // Pure recency — pinned items are NOT floated to the top. They were, and it made the one list
+      // people actually read lie about when things were copied: a pin from last week sat above the
+      // thing you copied ten seconds ago. Pinned items now have their own tab, which is the honest
+      // place for "show me only these", so this list can stay a timeline.
+      live.sort(recency)
       const offset = q.offset ?? 0
       const limit = q.limit ?? live.length
       return { items: live.slice(offset, offset + limit), total: live.length }
     },
 
-    search(q, limit) {
+    search(q, limit, filter = {}) {
       if (!previewsLoaded) return []
       const now = clock.now()
+      const tag = filter.tag === undefined ? '' : normalizeTag(filter.tag)
       const out: ScoredItem[] = []
       for (const hit of search.query(q, limit)) {
         const it = items.get(hit.id)
         if (it === undefined || !isLive(it, now)) continue
+        if (filter.pinnedOnly === true && !it.pinned) continue
+        if (tag !== '' && !it.tags.includes(tag)) continue
         out.push({ item: it, score: hit.score, ranges: hit.ranges })
       }
       return out
@@ -316,8 +385,10 @@ export function createHistory(deps: HistoryDeps): History {
       if (pinned && !isPinnable(it.flags)) {
         return err('E_PIN_REFUSED_SECRET', `item ${id} is secret-flagged and cannot be pinned`)
       }
-      const now = clock.now()
-      const patch = { updatedAt: now, pinned }
+      // `updatedAt` is left alone. Bumping it made pinning move the item to the top of the timeline,
+      // which is the same lie as sorting pinned rows first — a copy from last week would appear to
+      // have just happened. Pinning changes how long an item lives, not when it was copied.
+      const patch = { updatedAt: it.updatedAt, pinned }
       const appended = await store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
       if (!appended.ok) return appended
       const next = { ...it, ...patch }
@@ -326,6 +397,50 @@ export function createHistory(deps: HistoryDeps): History {
       logger.info('history.pinned', { itemId: id, ok: pinned })
       emit('update')
       return ok({ pinned })
+    },
+
+    async tag(id, rawTag, tagged) {
+      const it = items.get(id)
+      if (it === undefined) return err('E_ITEM_NOT_FOUND', `no item ${id}`)
+      const applied = applyTag(it.tags, rawTag, tagged)
+      if (applied.kind === 'invalid') return err('E_TAG_INVALID', 'a tab name cannot be empty')
+      if (applied.kind === 'at-limit') {
+        return err('E_TAG_LIMIT', `item ${id} already has ${String(TAGS_MAX_PER_ITEM)} tabs`)
+      }
+      if (applied.kind === 'unchanged') return ok({ tags: it.tags })
+      // `updatedAt` is deliberately NOT bumped: filing something into a tab is not re-copying it,
+      // and moving it to the top of the timeline is exactly the confusion the un-floated pin fixed.
+      const patch = { updatedAt: it.updatedAt, tags: applied.tags }
+      const appended = await store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
+      if (!appended.ok) return appended
+      const next = { ...it, ...patch }
+      items.set(id, next)
+      reindex(next)
+      // The COUNT only. A tab name is user-authored text typed into a field one keystroke away from a
+      // clipboard search box, so it is never logged.
+      logger.info('history.tagged', { itemId: id, count: applied.tags.length })
+      emit('update')
+      return ok({ tags: applied.tags })
+    },
+
+    tabs() {
+      const now = clock.now()
+      const counts = new Map<string, number>()
+      for (const it of items.values()) {
+        if (!isLive(it, now)) continue
+        for (const t of it.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+      }
+      return [...counts.entries()]
+        .map(([tag, count]) => ({ tag, count }))
+        .sort((a, b) => (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0))
+        .slice(0, TABS_MAX)
+    },
+
+    pinnedCount() {
+      const now = clock.now()
+      let n = 0
+      for (const it of items.values()) if (it.pinned && isLive(it, now)) n += 1
+      return n
     },
 
     async remove(id) {

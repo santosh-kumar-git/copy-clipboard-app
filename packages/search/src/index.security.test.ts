@@ -12,7 +12,7 @@ describe('the in-memory index never holds a raw secret', () => {
     expect(masked).toBe('AKIA••••A7QD')
 
     const ix = createSearchIndex()
-    ix.add({ id: 'ITEM1' as ItemId, preview: masked, pinned: false, updatedAt: 1, ord: 1 })
+    ix.add({ id: 'ITEM1' as ItemId, preview: masked, pinned: false, tagged: false, updatedAt: 1, ord: 1 })
 
     // debugHaystack() is the WHOLE plaintext surface of the index. Read all of it.
     expect(ix.debugHaystack()).toEqual(['AKIA••••A7QD'])
@@ -29,6 +29,7 @@ describe('the in-memory index never holds a raw secret', () => {
       id: 'P' as ItemId,
       preview: mask(`token ${RAW_AWS_KEY} end`).preview,
       pinned: true,
+      tagged: false,
       updatedAt: 1,
       ord: 1,
     })
@@ -38,7 +39,7 @@ describe('the in-memory index never holds a raw secret', () => {
 
   it('clear() leaves no plaintext behind for a later query to find', () => {
     const ix = createSearchIndex()
-    ix.add({ id: 'ITEM1' as ItemId, preview: 'AKIA••••A7QD', pinned: false, updatedAt: 1, ord: 1 })
+    ix.add({ id: 'ITEM1' as ItemId, preview: 'AKIA••••A7QD', pinned: false, tagged: false, updatedAt: 1, ord: 1 })
     ix.clear()
     expect(ix.size).toBe(0)
     expect(ix.debugHaystack()).toEqual([])
