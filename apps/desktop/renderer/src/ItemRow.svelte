@@ -16,12 +16,25 @@
     top: number
     nowMs: number
     onpick: () => void
+    onpin: () => void
+    ontag: () => void
+    ondelete: () => void
   }
-  let { item, selected, ranges, top, nowMs, onpick }: Props = $props()
+  let { item, selected, ranges, top, nowMs, onpick, onpin, ontag, ondelete }: Props = $props()
 
   const segments = $derived(highlightSegments(item.preview, ranges))
   const thumbnail = $derived(safeThumbnailSrc(item.thumbnailDataUrl))
   const expiry = $derived(secretExpiryLabel(item.expiresAt, nowMs))
+
+  /** A row action must not also count as picking the row, and must not steal focus from the search
+   *  field — losing focus there means the next keystroke goes nowhere. */
+  function act(run: () => void): (event: MouseEvent) => void {
+    return (event) => {
+      event.stopPropagation()
+      event.preventDefault()
+      run()
+    }
+  }
 </script>
 
 <!-- The listbox container owns the keyboard; a row is reachable only via aria-activedescendant,
@@ -51,8 +64,39 @@
       >{#each segments as seg, i (i)}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span
     >
   {/if}
+  {#each item.tags as tag (tag)}<span class="badge badge-tab">{tag}</span>{/each}
   {#if item.pinned}<span class="badge badge-pinned">Pinned</span>{/if}
   {#if item.flags.includes('secret')}
     <span class="badge badge-secret">Secret{expiry === null ? '' : ` · ${expiry}`}</span>
   {/if}
+
+  <!-- Every row action used to be keyboard-only, so with a mouse in your hand the pin and tab
+       features did not exist. Shown on hover and on the selected row; `onmousedown` is prevented so
+       the click never moves focus out of the search field. -->
+  <span class="row-actions">
+    <button
+      type="button"
+      class="row-btn"
+      title={item.pinned ? 'Unpin' : 'Pin (never evicted)'}
+      aria-label={item.pinned ? `Unpin ${item.preview}` : `Pin ${item.preview}`}
+      onmousedown={(e) => e.preventDefault()}
+      onclick={act(onpin)}>{item.pinned ? '★' : '☆'}</button
+    >
+    <button
+      type="button"
+      class="row-btn"
+      title="File into a tab (kept, never evicted)"
+      aria-label={`File ${item.preview} into a tab`}
+      onmousedown={(e) => e.preventDefault()}
+      onclick={act(ontag)}>#</button
+    >
+    <button
+      type="button"
+      class="row-btn row-btn-danger"
+      title="Delete"
+      aria-label={`Delete ${item.preview}`}
+      onmousedown={(e) => e.preventDefault()}
+      onclick={act(ondelete)}>✕</button
+    >
+  </span>
 </div>

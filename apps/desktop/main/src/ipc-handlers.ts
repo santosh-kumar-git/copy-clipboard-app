@@ -65,6 +65,8 @@ export function toItemSummary(item: Item, thumbnailDataUrl: string | null): Item
     byteLength: item.byteLength,
     createdAt: item.createdAt,
     pinned: item.pinned,
+    // Tabs are user-authored, so unlike everything else here they cross the boundary verbatim.
+    tags: [...(item.tags ?? [])],
     expiresAt: item.expiresAt,
     thumbnailDataUrl,
   } as ItemSummary
@@ -76,19 +78,35 @@ type Handler = (params: unknown, deps: IpcDeps) => Promise<Result<unknown>>
  *  compile error, and so is omitting one. */
 const HANDLERS: Record<IpcRequestChannel, Handler> = {
   'cairn:history.list': async (params, deps) => {
-    const p = params as { limit: number; offset: number; kind?: Item['kind']; pinnedOnly: boolean }
+    const p = params as {
+      limit: number
+      offset: number
+      kind?: Item['kind']
+      pinnedOnly: boolean
+      tag?: string
+    }
     const { items, total } = deps.history.list(p)
-    return ok({ items: items.map((it) => toItemSummary(it, null)), total })
+    return ok({
+      items: items.map((it) => toItemSummary(it, null)),
+      total,
+      tabs: deps.history.tabs().map((t) => ({ ...t })),
+      pinnedCount: deps.history.pinnedCount(),
+    })
   },
   'cairn:history.search': async (params, deps) => {
-    const p = params as { q: string; limit: number }
-    const results = deps.history.search(p.q, p.limit)
+    const p = params as { q: string; limit: number; pinnedOnly: boolean; tag?: string }
+    const results = deps.history.search(p.q, p.limit, {
+      pinnedOnly: p.pinnedOnly,
+      ...(p.tag === undefined ? {} : { tag: p.tag }),
+    })
     return ok({
       results: results.map((r) => ({
         item: toItemSummary(r.item, null),
         score: r.score,
         ranges: [...r.ranges],
       })),
+      tabs: deps.history.tabs().map((t) => ({ ...t })),
+      pinnedCount: deps.history.pinnedCount(),
     })
   },
   'cairn:history.preview': async (params, deps) =>
@@ -96,6 +114,11 @@ const HANDLERS: Record<IpcRequestChannel, Handler> = {
   'cairn:history.pin': async (params, deps) => {
     const p = params as { id: string; pinned: boolean }
     return await deps.history.pin(p.id as ItemId, p.pinned)
+  },
+  'cairn:history.tag': async (params, deps) => {
+    const p = params as { id: string; tag: string; tagged: boolean }
+    const res = await deps.history.tag(p.id as ItemId, p.tag, p.tagged)
+    return res.ok ? ok({ tags: [...res.value.tags] }) : res
   },
   'cairn:history.remove': async (params, deps) =>
     await deps.history.remove((params as { id: string }).id as ItemId),

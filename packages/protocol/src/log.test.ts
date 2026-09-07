@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { LOG_EVENTS, type LogEvent, type Logger } from './log'
 
 describe('LOG_EVENTS is the closed set of log message ids', () => {
-  it('holds 53 ids with no duplicates', () => {
-    expect(LOG_EVENTS).toHaveLength(53)
-    expect(new Set(LOG_EVENTS).size).toBe(53)
+  it('holds 54 ids with no duplicates', () => {
+    expect(LOG_EVENTS).toHaveLength(54)
+    expect(new Set(LOG_EVENTS).size).toBe(54)
   })
 
   it('every id is a dotted lowercase-kebab pair, so no sentence can ever be one', () => {
@@ -44,7 +44,7 @@ describe('LOG_EVENTS is the closed set of log message ids', () => {
       error: (e, f) => spy.log('error', e, f),
     }
     for (const e of LOG_EVENTS) spy.info(e, { ok: true })
-    expect(seen).toHaveLength(53)
+    expect(seen).toHaveLength(54)
     expect(new Set(seen.flatMap((s) => s.keys))).toEqual(new Set(['ok']))
   })
 })

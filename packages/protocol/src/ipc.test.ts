@@ -20,17 +20,19 @@ const summary = {
   byteLength: 20,
   createdAt: 1_767_225_600_000,
   pinned: false,
+  tags: ['work'],
   expiresAt: 1_767_225_900_000,
   thumbnailDataUrl: null,
 }
 
 describe('the channel lists are frozen and complete', () => {
-  it('has eight request channels and four event channels, each with a schema', () => {
+  it('has nine request channels and four event channels, each with a schema', () => {
     expect(IPC_REQUEST_CHANNELS).toEqual([
       'cairn:history.list',
       'cairn:history.search',
       'cairn:history.preview',
       'cairn:history.pin',
+      'cairn:history.tag',
       'cairn:history.remove',
       'cairn:recall.copy',
       'cairn:palette.close',
@@ -47,7 +49,7 @@ describe('the channel lists are frozen and complete', () => {
       expect(IpcRequestSchema[c].result).toBeDefined()
     }
     for (const c of IPC_EVENT_CHANNELS) expect(IpcEventSchema[c]).toBeDefined()
-    expect(Object.keys(IpcRequestSchema)).toHaveLength(8)
+    expect(Object.keys(IpcRequestSchema)).toHaveLength(9)
     expect(Object.keys(IpcEventSchema)).toHaveLength(4)
   })
 })
@@ -76,11 +78,11 @@ describe('inbound params are validated (main side)', () => {
 })
 
 describe('outbound results are validated (main side), and carry no bytes', () => {
-  it('ItemSummary has exactly twelve keys, none of which can hold a body', () => {
+  it('ItemSummary has exactly thirteen keys, none of which can hold a body', () => {
     const keys = Object.keys(ItemSummarySchema.shape)
     expect(keys).toEqual([
       'id', 'kind', 'preview', 'previewTruncated', 'flags', 'maskedSpanCount', 'sourceAppName',
-      'byteLength', 'createdAt', 'pinned', 'expiresAt', 'thumbnailDataUrl',
+      'byteLength', 'createdAt', 'pinned', 'tags', 'expiresAt', 'thumbnailDataUrl',
     ])
     for (const banned of ['bytes', 'reps', 'repRefs', 'blobId', 'raw', 'html', 'text']) {
       expect(keys).not.toContain(banned)

@@ -13,7 +13,7 @@ export const LOG_EVENTS = [
   'rep.inline-received', 'rep.stream-begin', 'rep.stream-complete', 'rep.stream-aborted',
   'capture.candidate', 'capture.self-write-suppressed', 'capture.debounced', 'capture.thumbnail',
   'privacy.skipped', 'privacy.masked', 'privacy.sync-refused',
-  'history.ingested', 'history.duplicate', 'history.evicted', 'history.pinned', 'history.removed',
+  'history.ingested', 'history.duplicate', 'history.evicted', 'history.pinned', 'history.tagged', 'history.removed',
   'history.previews-reloaded', 'history.preview-reload-failed', 'history.evict-failed',
   'history.limit-changed',
   'store.opened', 'store.appended', 'store.compacted', 'store.torn-line-discarded',

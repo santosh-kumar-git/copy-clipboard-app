@@ -9,8 +9,10 @@ Spotlight-style bar appears over whatever you're doing. Type a few letters to fu
 you copied an hour ago, press Enter, and it's back on your clipboard — pasted at your cursor, with
 focus returned to where you were.
 
-Text, rich text, images and copied file paths. Pinned favourites. Passwords and API keys detected and
-never recorded. History encrypted at rest. Later: sync to a paired phone over your LAN,
+Text, rich text, images and copied file paths. Pinned favourites, and tabs you name yourself: file a
+copy into `work` or `sql` and it shows up under that tab. Pinning and filing are the same promise —
+anything pinned or in a tab is kept whatever the "last N" limit is, so it is still there at copy 501.
+Passwords and API keys detected and never recorded. History encrypted at rest. Later: sync to a paired phone over your LAN,
 end-to-end encrypted, with no account and no cloud.
 
 ---

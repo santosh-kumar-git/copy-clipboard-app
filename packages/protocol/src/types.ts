@@ -105,6 +105,16 @@ export interface Item {
   readonly createdAt: number
   readonly updatedAt: number
   readonly pinned: boolean
+  /**
+   * The tabs this item appears under. Already `normalizeTag`d, deduped, at most TAGS_MAX_PER_ITEM.
+   * Records written before tabs existed have no `tags` key at all, so every reader defaults it to
+   * `[]` rather than trusting the field to be present.
+   *
+   * Being in a tab exempts the item from the age, count and byte limits exactly as `pinned` does
+   * (`isKept` in @cairn/history): a tab whose contents evaporated at the 500th copy would be a folder
+   * that loses your files. It does NOT exempt it from the secret TTL, which nothing overrides.
+   */
+  readonly tags: readonly string[]
   /** createdAt + SECRET_TTL_MS for secret-flagged items, else null. */
   readonly expiresAt: number | null
 }
@@ -112,7 +122,14 @@ export interface Item {
 export interface ItemPatch {
   readonly updatedAt: number
   readonly pinned?: boolean
+  readonly tags?: readonly string[]
   readonly expiresAt?: number | null
+}
+
+/** One tab in the palette's tab bar, with how many live items carry it. */
+export interface Tab {
+  readonly tag: string
+  readonly count: number
 }
 
 export type DeleteReason =

@@ -40,10 +40,24 @@ export const RETENTION_MAX_BYTES = 512 * 1024 * 1024
 export const SEARCH_INDEX_DEFAULT = 500
 export const SEARCH_INDEX_HARD_CAP = 2_000
 export const PREVIEW_MAX_CHARS = 512
+/** Tabs (§5.8). A tab IS a tag: there is no separate tab registry, so a tab exists exactly as long
+ *  as an item carries its name and cannot be orphaned by a delete or an eviction. */
+export const TAG_MAX_CHARS = 24
+export const TAGS_MAX_PER_ITEM = 8
+export const TABS_MAX = 32
 export const THUMBNAIL_MAX_EDGE_PX = 256
 export const THUMBNAIL_JPEG_QUALITY = 70
 export const THUMBNAIL_MAX_BYTES = 24 * 1024
 export const SCRYPT_PARAMS = { N: 2 ** 17, r: 8, p: 1, maxmem: 192 * 1024 * 1024 } as const
+
+/**
+ * The ONE tag normaliser. Lower-cased and whitespace-collapsed so `Work `, `work` and `Work  ` are
+ * the same tab rather than three tabs that look identical in the tab bar. Returns `''` for anything
+ * that normalises to nothing, and callers treat `''` as "not a tag".
+ */
+export function normalizeTag(raw: string): string {
+  return raw.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, TAG_MAX_CHARS).trim()
+}
 
 /** The mime the macOS agent emits for Chrome's `org.chromium.source-url` rider. Frozen here so the
  *  agent and the capture layer cannot disagree; it is NOT `text/uri-list` and must never classify

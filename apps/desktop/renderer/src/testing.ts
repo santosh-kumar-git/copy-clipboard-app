@@ -18,6 +18,7 @@ export function makeItem(n: number, over: Partial<ItemSummary> = {}): ItemSummar
     byteLength: 8,
     createdAt: 1_767_225_600_000 - n * 1_000,
     pinned: false,
+    tags: [],
     expiresAt: null,
     thumbnailDataUrl: null,
     ...over,
@@ -37,7 +38,10 @@ export interface FakeApi {
   readonly previewCalls: string[]
   readonly copyCalls: string[]
   readonly pinCalls: { id: string; pinned: boolean }[]
+  readonly tagCalls: { id: string; tag: string; tagged: boolean }[]
   readonly removeCalls: string[]
+  /** Rejects `tag` with this code, so a test can drive the E_TAG_LIMIT toast. */
+  failTagWith: string | null
   closeCalls: number
   /** The whole synthetic history the fake pages out of. */
   items: ItemSummary[]
@@ -83,6 +87,8 @@ export function createFakeApi(
     previewCalls: [],
     copyCalls: [],
     pinCalls: [],
+    tagCalls: [],
+    failTagWith: null,
     removeCalls: [],
     closeCalls: 0,
     items: init.items ?? [],
@@ -104,18 +110,41 @@ export function createFakeApi(
       ? new Promise<T>((resolve) => fake.pending.push(() => resolve(value)))
       : Promise.resolve(value)
 
+  /** The fake filters and counts the same way main does, so a tab test proves the wiring rather than
+   *  the fake's opinion of it. */
+  const matching = (p: { pinnedOnly?: boolean; tag?: string | undefined }): ItemSummary[] =>
+    fake.items.filter(
+      (it) =>
+        (p.pinnedOnly !== true || it.pinned) && (p.tag === undefined || it.tags.includes(p.tag)),
+    )
+  const tabsOf = (): { tag: string; count: number }[] => {
+    const counts = new Map<string, number>()
+    for (const it of fake.items) for (const t of it.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => (a.tag < b.tag ? -1 : 1))
+  }
+  const pinnedCount = (): number => fake.items.filter((it) => it.pinned).length
+
   const api: CairnBridge = {
     list: (params) => {
       fake.listCalls.push(params)
       if (fake.failList) return Promise.reject(new Error('E_IPC_REJECTED'))
+      const live = matching(params)
       return settle({
-        items: fake.items.slice(params.offset, params.offset + params.limit),
-        total: fake.items.length,
+        items: live.slice(params.offset, params.offset + params.limit),
+        total: live.length,
+        tabs: tabsOf(),
+        pinnedCount: pinnedCount(),
       })
     },
     search: (params) => {
       fake.searchCalls.push(params)
-      return settle({ results: fake.searchHitsFor(params.q).slice(0, params.limit) })
+      return settle({
+        results: fake.searchHitsFor(params.q).slice(0, params.limit),
+        tabs: tabsOf(),
+        pinnedCount: pinnedCount(),
+      })
     },
     preview: (params) => {
       fake.previewCalls.push(params.id)
@@ -125,7 +154,24 @@ export function createFakeApi(
     },
     pin: (params) => {
       fake.pinCalls.push(params)
+      fake.items = fake.items.map((it) =>
+        it.id === params.id ? { ...it, pinned: params.pinned } : it,
+      )
       return settle({ pinned: params.pinned })
+    },
+    tag: (params) => {
+      fake.tagCalls.push(params)
+      if (fake.failTagWith !== null) return Promise.reject(new Error(fake.failTagWith))
+      const tag = params.tag.replace(/\s+/g, ' ').trim().toLowerCase()
+      let tags: string[] = []
+      fake.items = fake.items.map((it) => {
+        if (it.id !== params.id) return it
+        tags = params.tagged
+          ? [...new Set([...it.tags, tag])].sort()
+          : it.tags.filter((t) => t !== tag)
+        return { ...it, tags }
+      })
+      return settle({ tags })
     },
     remove: (params) => {
       fake.removeCalls.push(params.id)

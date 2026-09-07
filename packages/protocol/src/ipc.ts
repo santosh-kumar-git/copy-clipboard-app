@@ -1,10 +1,12 @@
 import * as z from 'zod'
+import { TABS_MAX, TAG_MAX_CHARS, TAGS_MAX_PER_ITEM } from './constants'
 
 export const IPC_REQUEST_CHANNELS = [
   'cairn:history.list',
   'cairn:history.search',
   'cairn:history.preview',
   'cairn:history.pin',
+  'cairn:history.tag',
   'cairn:history.remove',
   'cairn:recall.copy',
   'cairn:palette.close',
@@ -22,6 +24,11 @@ export type IpcEventChannel = (typeof IPC_EVENT_CHANNELS)[number]
 
 export const ItemIdSchema = z.string().length(26).regex(/^[0-9A-HJKMNP-TV-Z]{26}$/)
 
+/** A tab name as it crosses the boundary: already normalised, so a schema violation here means the
+ *  normaliser was skipped rather than that the user typed something odd. */
+export const TagSchema = z.string().min(1).max(TAG_MAX_CHARS)
+export const TabSchema = z.object({ tag: TagSchema, count: z.int().min(0) })
+
 /** What crosses to the renderer. Note there is no `repRefs` and no raw bytes: the renderer can
  *  never ask for a body, only for the masked preview and the thumbnail. */
 export const ItemSummarySchema = z.object({
@@ -35,6 +42,7 @@ export const ItemSummarySchema = z.object({
   byteLength: z.int().min(0),
   createdAt: z.int(),
   pinned: z.boolean(),
+  tags: z.array(TagSchema).max(TAGS_MAX_PER_ITEM),
   expiresAt: z.int().nullable(),
   thumbnailDataUrl: z.string().startsWith('data:image/jpeg;base64,').nullable(),
 })
@@ -46,13 +54,33 @@ export const IpcRequestSchema = {
       offset: z.int().min(0),
       kind: z.enum(['text', 'richtext', 'image', 'files']).optional(),
       pinnedOnly: z.boolean().default(false),
+      /** The active tab, when it is a user tag. The Pinned tab uses `pinnedOnly` instead. */
+      tag: TagSchema.optional(),
     }),
-    result: z.object({ items: z.array(ItemSummarySchema), total: z.int().min(0) }),
+    // `tabs` and `pinnedCount` are always counted over the WHOLE live set, never over the filtered
+    // page: a tab bar whose counts changed depending on which tab was open would be unreadable.
+    result: z.object({
+      items: z.array(ItemSummarySchema),
+      total: z.int().min(0),
+      tabs: z.array(TabSchema).max(TABS_MAX),
+      pinnedCount: z.int().min(0),
+    }),
   },
   'cairn:history.search': {
-    params: z.object({ q: z.string().max(256), limit: z.int().min(1).max(200) }),
+    // Searching inside a tab searches that tab: a query typed with Work open that answered from the
+    // whole history would silently ignore the tab the user is looking at.
+    params: z.object({
+      q: z.string().max(256),
+      limit: z.int().min(1).max(200),
+      pinnedOnly: z.boolean().default(false),
+      tag: TagSchema.optional(),
+    }),
+    // `tabs`/`pinnedCount` ride along here as well as on `list` so the tab bar cannot go stale while
+    // a query is being typed — the bar is on screen the whole time the search results are.
     result: z.object({
       results: z.array(z.object({ item: ItemSummarySchema, score: z.number(), ranges: z.array(z.int().min(0)) })),
+      tabs: z.array(TabSchema).max(TABS_MAX),
+      pinnedCount: z.int().min(0),
     }),
   },
   'cairn:history.preview': {
@@ -64,6 +92,11 @@ export const IpcRequestSchema = {
   'cairn:history.pin': {
     params: z.object({ id: ItemIdSchema, pinned: z.boolean() }),
     result: z.object({ pinned: z.boolean() }),
+  },
+  'cairn:history.tag': {
+    // `tag` is the RAW string the user typed; the handler normalises it. `tagged: false` removes it.
+    params: z.object({ id: ItemIdSchema, tag: z.string().max(TAG_MAX_CHARS), tagged: z.boolean() }),
+    result: z.object({ tags: z.array(TagSchema).max(TAGS_MAX_PER_ITEM) }),
   },
   'cairn:history.remove': {
     params: z.object({ id: ItemIdSchema }),

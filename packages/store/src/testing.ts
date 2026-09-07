@@ -55,6 +55,7 @@ export function itemFixture(id: ItemId, blobId: BlobId, text: string): Item {
     createdAt: 1_767_225_600_000,
     updatedAt: 1_767_225_600_000,
     pinned: false,
+    tags: [],
     expiresAt: null,
   }
 }

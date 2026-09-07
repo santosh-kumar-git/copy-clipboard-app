@@ -28,13 +28,26 @@ html,
 body {
   margin: 0;
   padding: 0;
+  height: 100%;
   background: transparent;
   color: var(--cairn-fg);
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif;
   overflow: hidden;
 }
 
+#app {
+  display: block;
+  height: 100%;
+}
+
+/* A flex column filling the window, so the preview pane gets whatever height the rows and the bars
+   do not use. It used to be a plain block taller than the window it lived in, which silently clipped
+   the bottom of the palette: the preview showed a single line and the action bar was cut in half. */
 .palette {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  box-sizing: border-box;
   background: var(--cairn-bg);
   border-radius: 10px;
   padding: 8px;
@@ -62,6 +75,95 @@ body {
   border-radius: 6px;
   background: rgba(255, 214, 121, 0.16);
   color: var(--cairn-fg);
+}
+
+.search,
+.tabs,
+.tag-row,
+.status-row,
+.results,
+.hints {
+  flex: none;
+}
+
+/* The tab bar. A tab IS a tag, so this bar is derived from the items and can never list a tab with
+   nothing in it — except Pinned, which is permanent on purpose. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tab {
+  flex: none;
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  background: transparent;
+  color: var(--cairn-dim);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tab:hover:not(:disabled) {
+  border-color: rgb(255 255 255 / 32%);
+  color: var(--cairn-fg);
+}
+
+.tab-active {
+  background: var(--cairn-accent);
+  border-color: transparent;
+  color: var(--cairn-fg);
+}
+
+.tab-count {
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.tab-new {
+  margin-left: auto;
+}
+
+.tab:disabled {
+  opacity: 0.35;
+}
+
+.tag-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.tag-input {
+  flex: 0 1 200px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--cairn-accent);
+  background: rgb(255 255 255 / 6%);
+  color: var(--cairn-fg);
+  font: inherit;
+}
+
+.tag-chip {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 18%);
+  background: transparent;
+  color: var(--cairn-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: default;
 }
 
 .results {
@@ -93,8 +195,46 @@ body {
 }
 
 .row-preview {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Hidden until the row is hovered or selected, so eight rows of buttons do not shout over the
+   contents. `visibility` rather than `display` keeps the row's layout identical either way. */
+.row-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  visibility: hidden;
+}
+
+.row:hover .row-actions,
+.row.selected .row-actions {
+  visibility: visible;
+}
+
+.row-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  background: rgb(0 0 0 / 25%);
+  color: var(--cairn-fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: default;
+}
+
+.row-btn:hover {
+  border-color: rgb(255 255 255 / 40%);
+}
+
+.row-btn-danger:hover {
+  color: var(--cairn-hit);
 }
 
 /* The no-text-preview case: an image, or files with no readable path. Dimmed so it reads as a
@@ -121,11 +261,18 @@ body {
   object-fit: cover;
 }
 
+/* No `margin-left: auto` any more: the preview span is the flexible one, so badges and the action
+   buttons sit against the right edge in source order instead of fighting over the same trick. */
 .badge {
   flex: none;
-  margin-left: auto;
   font-size: 10px;
   color: var(--cairn-dim);
+}
+
+.badge-tab {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 10%);
 }
 
 .badge-secret {
@@ -143,11 +290,16 @@ mark {
   color: var(--cairn-dim);
 }
 
+/* Takes every pixel the rest of the palette does not, with a floor: 132px of fixed height showed a
+   single line of a long copy, which is not enough to tell two similar ones apart. */
 .preview-pane {
+  /* `1 1 148px`, not a min-height: the pane must be able to give a little back when the tab-name
+     field opens, and a hard floor is what clipped the bar underneath it. */
+  flex: 1 1 148px;
+  min-height: 0;
   margin-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.12);
   padding-top: 8px;
-  max-height: 132px;
   overflow: auto;
 }
 
@@ -187,16 +339,17 @@ mark {
 }
 
 
-/* The shortcut hint row. Pin and delete are keyboard-only, so this is the only place they are
-   discoverable; it is quiet enough to ignore and always present enough to find. */
+/* The action bar. Every entry names its keyboard shortcut, and every entry that has an action behind
+   it is a real button — the row of grey text this used to be made pin and delete discoverable
+   without making them usable with a mouse. */
 .hints {
   display: flex;
-  gap: 14px;
+  gap: 8px;
   align-items: center;
-  padding: 6px 12px;
+  margin-top: 8px;
+  padding: 6px 4px 0;
   border-top: 1px solid rgb(255 255 255 / 8%);
   font-size: 11px;
-  opacity: 0.55;
   user-select: none;
 }
 
@@ -205,6 +358,28 @@ mark {
   gap: 4px;
   align-items: center;
   white-space: nowrap;
+  opacity: 0.55;
+}
+
+.hint-button {
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  background: transparent;
+  color: var(--cairn-fg);
+  font: inherit;
+  font-size: 11px;
+  cursor: default;
+  opacity: 0.8;
+}
+
+.hint-button:hover:not(:disabled) {
+  border-color: rgb(255 255 255 / 34%);
+  opacity: 1;
+}
+
+.hint-button:disabled {
+  opacity: 0.3;
 }
 
 .hints kbd {

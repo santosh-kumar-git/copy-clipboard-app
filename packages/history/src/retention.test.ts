@@ -19,6 +19,7 @@ interface ItemSpec {
   readonly createdAt: number
   readonly bytes?: number
   readonly pinned?: boolean
+  readonly tags?: readonly string[]
   readonly expiresAt?: number | null
 }
 const item = (o: ItemSpec): Item => ({
@@ -36,6 +37,7 @@ const item = (o: ItemSpec): Item => ({
   createdAt: o.createdAt,
   updatedAt: o.createdAt,
   pinned: o.pinned ?? false,
+  tags: o.tags ?? [],
   expiresAt: o.expiresAt ?? null,
 })
 
@@ -48,6 +50,32 @@ describe('planEviction — the 500-item limit', () => {
     expect(plan).toHaveLength(3)
     expect(plan.every((ev) => ev.reason === 'retention-count')).toBe(true)
     expect(plan.map((ev) => String(ev.id)).sort()).toEqual(['I0500', 'I0501', 'I0502'])
+  })
+
+  it('an item in a tab is exempt from every limit, exactly as a pinned one is', () => {
+    const filed = item({
+      id: 'FILED-ANCIENT',
+      createdAt: NOW - RETENTION_MAX_AGE_MS * 10,
+      bytes: RETENTION_MAX_BYTES * 2,
+      tags: ['work'],
+    })
+    const items = [
+      filed,
+      ...Array.from({ length: RETENTION_MAX_ITEMS + 1 }, (_, i) =>
+        item({ id: `I${String(i).padStart(4, '0')}`, createdAt: NOW - i }),
+      ),
+    ]
+    const plan = planEviction(items, NOW, { ...DEFAULT_RETENTION, maxAgeMs: RETENTION_MAX_AGE_MS })
+    expect(plan.map((ev) => String(ev.id))).not.toContain('FILED-ANCIENT')
+    // Its bytes do not consume the budget either, or one huge filed item would evict the history.
+    expect(plan.every((ev) => ev.reason === 'retention-count')).toBe(true)
+  })
+
+  it('a filed secret still expires: nothing overrides the TTL', () => {
+    const items = [
+      item({ id: 'SECRET-FILED', createdAt: NOW - 1, tags: ['work'], expiresAt: NOW - 1 }),
+    ]
+    expect(planEviction(items, NOW)).toEqual([{ id: 'SECRET-FILED', reason: 'secret-ttl' }])
   })
 
   it('pinned items are exempt from the count limit and do not consume a slot', () => {

@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcEventChannel } from '@cairn/protocol'
 
 /**
- * Spec §11 control 4. TWELVE methods, each with its channel written out as a string literal in the
+ * Spec §11 control 4. THIRTEEN methods, each with its channel written out as a string literal in the
  * call. There is deliberately no `invoke(channel, params)` and no `send`: a generic bridge means
  * every current and future main-process handler is reachable from any script that gets into the
  * page, and the whole decrypted history is one call behind those handlers.
@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('cairn', {
   search: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.search', params)),
   preview: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.preview', params)),
   pin: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.pin', params)),
+  tag: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.tag', params)),
   remove: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.remove', params)),
   copy: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:recall.copy', params)),
   close: () => unwrap(ipcRenderer.invoke('cairn:palette.close', {})),
