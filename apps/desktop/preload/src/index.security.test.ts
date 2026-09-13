@@ -36,13 +36,13 @@ describe('the exposed surface', () => {
     expect(Object.keys(exposed)).toEqual(['cairn'])
   })
 
-  it('is EXACTLY these thirteen methods — no more, no fewer', async () => {
+  it('is EXACTLY these fifteen methods — no more, no fewer', async () => {
     const api = await loadPreload()
     expect(Object.keys(api).sort()).toEqual([
       'close', 'list', 'onHistoryChanged', 'onHotkeyStatus', 'onPaletteShown', 'onToast',
-      'pin', 'preview', 'remove', 'search', 'securityStatus', 'tag',
+      'paletteReady', 'pin', 'preview', 'remove', 'search', 'securityStatus', 'setTitle', 'tag',
     ].concat(['copy']).sort())
-    expect(Object.keys(api)).toHaveLength(13)
+    expect(Object.keys(api)).toHaveLength(15)
   })
 
   it('exposes no generic bridge into the main process', async () => {
@@ -68,9 +68,11 @@ describe('channel hard-coding', () => {
     await api['preview']!({ id: '01KDVDNA00041061050R3GG28A' })
     await api['pin']!({ id: '01KDVDNA00041061050R3GG28A', pinned: true })
     await api['tag']!({ id: '01KDVDNA00041061050R3GG28A', tag: 'work', tagged: true })
+    await api['setTitle']!({ id: '01KDVDNA00041061050R3GG28A', title: 'Alias' })
     await api['remove']!({ id: '01KDVDNA00041061050R3GG28A' })
     await api['copy']!({ id: '01KDVDNA00041061050R3GG28A' })
     await api['close']!()
+    await api['paletteReady']!({ shownAt: 1_767_225_600_000 })
     await api['securityStatus']!()
     expect(invokeCalls.map(([c]) => c)).toEqual([
       'cairn:history.list',
@@ -78,13 +80,17 @@ describe('channel hard-coding', () => {
       'cairn:history.preview',
       'cairn:history.pin',
       'cairn:history.tag',
+      'cairn:history.title',
       'cairn:history.remove',
       'cairn:recall.copy',
       'cairn:palette.close',
+      'cairn:palette.ready',
       'cairn:security.status',
     ])
-    // The nine channels invoked are exactly the nine the protocol declares.
+    // Every invocation must belong to the explicitly exposed request channels.
     expect(new Set(invokeCalls.map(([c]) => c))).toEqual(new Set(IPC_REQUEST_CHANNELS))
+    expect(invokeCalls).toContainEqual(['cairn:history.title', { id: '01KDVDNA00041061050R3GG28A', title: 'Alias' }])
+    expect(invokeCalls).toContainEqual(['cairn:palette.ready', { shownAt: 1_767_225_600_000 }])
   })
 
   it('the no-argument methods send an empty object, not undefined', async () => {
@@ -137,7 +143,7 @@ describe('the preload source itself', () => {
     // own call site: the nine request methods pass it straight to ipcRenderer.invoke, and the four
     // event methods pass it to the local `subscribe` helper.
     const literals = [...source.matchAll(/(?:ipcRenderer\.invoke|subscribe)\(\s*('cairn:[a-z.]+')/g)]
-    expect(literals).toHaveLength(13)
+    expect(literals).toHaveLength(15)
 
     // `subscribe` is the ONLY place an identifier may stand where a channel goes, and it is a local
     // function — never exposed — so the page cannot reach it to pick one. Assert both halves: the

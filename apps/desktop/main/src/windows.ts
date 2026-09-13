@@ -234,11 +234,14 @@ export function hardenSession(
 }
 
 export interface BrowserWindowLike {
+  on(event: 'blur', cb: () => void): void
   readonly webContents: NavGuardTarget & {
     send(channel: string, payload: unknown): void
     isDestroyed(): boolean
+    setBackgroundThrottling(enabled: boolean): void
   }
   setAlwaysOnTop(flag: boolean, level: string): void
+  setBounds(bounds: { x: number; y: number; width: number; height: number }): void
   setVisibleOnAllWorkspaces(
     visible: boolean,
     opts: { visibleOnFullScreen: boolean; skipTransformProcessType: boolean },
@@ -249,12 +252,14 @@ export interface BrowserWindowLike {
   hide(): void
   focus(): void
   isVisible(): boolean
+  isFocused(): boolean
   isDestroyed(): boolean
   destroy(): void
 }
 
 export interface PaletteController {
   show(): void
+  ready(shownAt: number): boolean
   hide(): void
   isVisible(): boolean
   send<C extends IpcEventChannel>(channel: C, payload: unknown): void
@@ -263,6 +268,12 @@ export interface PaletteController {
 
 export function createPaletteWindow(deps: {
   BrowserWindowCtor: new (o: PaletteWindowOptions) => BrowserWindowLike
+  screen: {
+    getCursorScreenPoint(): { x: number; y: number }
+    getDisplayNearestPoint(point: { x: number; y: number }): {
+      workArea: { x: number; y: number; width: number; height: number }
+    }
+  }
   mode: RuntimeMode
   preloadPath: string
   rendererIndexPath: string
@@ -270,8 +281,20 @@ export function createPaletteWindow(deps: {
   clock: Clock
   logger: Logger
 }): PaletteController {
-  const { BrowserWindowCtor, mode, preloadPath, rendererIndexPath, env, logger } = deps
+  const { BrowserWindowCtor, screen, mode, preloadPath, rendererIndexPath, env, logger } = deps
   const win = new BrowserWindowCtor(paletteWindowOptions({ mode, preloadPath }))
+  let shown = false
+  let awaitingShownAt: number | null = null
+  const hide = (): void => {
+    if (!shown) return
+    shown = false
+    awaitingShownAt = null
+    if (win.isVisible()) win.hide()
+  }
+  win.webContents.setBackgroundThrottling(false)
+  win.on('blur', () => {
+    if (!win.isFocused()) hide()
+  })
 
   // 'screen-saver' is the only always-on-top level that clears a full-screen app.
   win.setAlwaysOnTop(true, 'screen-saver')
@@ -291,15 +314,36 @@ export function createPaletteWindow(deps: {
 
   return {
     show() {
+      hide()
+      const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+      const width = Math.min(PALETTE_WIDTH, Math.max(1, workArea.width - 32))
+      const height = Math.min(PALETTE_HEIGHT, Math.max(1, workArea.height - 32))
+      // Recompute before showing so a reused palette follows the user's current display.
+      win.setBounds({
+        x: Math.round(workArea.x + (workArea.width - width) / 2),
+        y: Math.round(workArea.y + (workArea.height - height) / 2),
+        width,
+        height,
+      })
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+      shown = true
+    },
+    ready(shownAt) {
+      if (!shown || awaitingShownAt !== shownAt || win.isDestroyed()) return false
+      awaitingShownAt = null
       win.show()
       // An accessory app is not activated by show() alone, so the search field would get no
       // keystrokes. focus() is what makes typing work.
       win.focus()
+      return true
     },
-    hide() { win.hide() },
-    isVisible() { return !win.isDestroyed() && win.isVisible() },
+    hide,
+    isVisible() { return shown && !win.isDestroyed() },
     send(channel, payload) {
       if (win.isDestroyed() || win.webContents.isDestroyed()) return
+      if (channel === 'cairn:palette.shown' && shown) {
+        awaitingShownAt = (payload as { shownAt: number }).shownAt
+      }
       win.webContents.send(channel, payload)
     },
     destroy() { if (!win.isDestroyed()) win.destroy() },

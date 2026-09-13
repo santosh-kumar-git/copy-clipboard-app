@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import {
-  app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, session, Tray,
+  app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, screen, session, Tray,
 } from 'electron'
 import { createHistory } from '@cairn/history'
 import { createSearchIndex } from '@cairn/search'
@@ -80,14 +80,15 @@ const RESOURCES_DIR = app.isPackaged
   : join(app.getAppPath(), 'resources')
 
 app.on('second-instance', () => {
-  paletteRef?.show()
+  paletteRef?.showPalette()
 })
+app.on('activate', () => { paletteRef?.showPalette() })
 
 // An accessory app has no windows most of the time; the default "quit when the last window closes"
 // would quit us the first time the palette is dismissed.
 app.on('window-all-closed', () => {})
 
-let paletteRef: { show(): void } | null = null
+let paletteRef: { showPalette(): void } | null = null
 /** Module scope on purpose: a Tray only referenced inside a function is collected and the icon
  *  disappears from the menu bar a few seconds after launch. */
 let trayRef: TrayLike | null = null
@@ -201,6 +202,7 @@ async function main(): Promise<void> {
 
   const palette = createPaletteWindow({
     BrowserWindowCtor: BrowserWindow as never,
+    screen,
     mode,
     preloadPath: join(app.getAppPath(), 'out', 'preload', 'index.js'),
     rendererIndexPath: join(app.getAppPath(), 'out', 'renderer', 'index.html'),
@@ -208,7 +210,6 @@ async function main(): Promise<void> {
     clock: systemClock,
     logger,
   })
-  paletteRef = palette
 
   const cairn = composeApp({
     agent,
@@ -244,6 +245,7 @@ async function main(): Promise<void> {
 
   const started = await cairn.start()
   if (!started.ok) throw new Error(`cairn: startup failed: ${started.code} ${started.message}`)
+  paletteRef = cairn
 
   // The menu bar icon, created AFTER start() so it never appears while the app is still unusable —
   // and so it can label itself with the accelerator that actually bound. Held in a module-level
@@ -257,6 +259,7 @@ async function main(): Promise<void> {
     accelerator: started.value.accelerator,
     historyLimit: () => cairn.historyLimit(),
     onToggle: () => { cairn.togglePalette() },
+    onOpen: () => { cairn.showPalette() },
     onSetHistoryLimit: (limit) => { void cairn.setHistoryLimit(limit) },
     onQuit: () => { app.quit() },
     logger,

@@ -21,16 +21,18 @@ export type ToastPayload = PayloadOf<'cairn:toast'>
 export type PaletteShownPayload = PayloadOf<'cairn:palette.shown'>
 export type HotkeyStatus = HotkeyStatusPayload['status']
 
-/** Exactly the thirteen methods the preload exposes. No `invoke`, no channel parameter. */
+/** Named operations only; no generic IPC channel access. */
 export interface CairnBridge {
   list(params: ListParams): Promise<ListResult>
   search(params: SearchParams): Promise<SearchResult>
   preview(params: { id: string }): Promise<PreviewResult>
   pin(params: { id: string; pinned: boolean }): Promise<{ pinned: boolean }>
   tag(params: { id: string; tag: string; tagged: boolean }): Promise<{ tags: string[] }>
+  setTitle(params: { id: string; title: string | null }): Promise<{ title: string | null }>
   remove(params: { id: string }): Promise<{ removed: boolean }>
   copy(params: { id: string }): Promise<CopyResult>
   close(): Promise<{ closed: true }>
+  paletteReady(params: { shownAt: number }): Promise<{ ready: boolean }>
   securityStatus(): Promise<SecurityStatus>
   onHistoryChanged(cb: (p: HistoryChangedPayload) => void): Unsub
   onHotkeyStatus(cb: (p: HotkeyStatusPayload) => void): Unsub

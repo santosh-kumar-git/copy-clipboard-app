@@ -1,25 +1,25 @@
 # Cairn
 
-A clipboard manager for macOS, Windows and Linux from one codebase.
+A clipboard manager for macOS, with Windows and Linux planned.
 
 A cairn is the stack of stones you build to find your way back. That is a clipboard history.
 
 Copy things all day; Cairn keeps the last N. Press `Cmd/Ctrl+Shift+V` in any app and a
 Spotlight-style bar appears over whatever you're doing. Type a few letters to fuzzy-find something
-you copied an hour ago, press Enter, and it's back on your clipboard — pasted at your cursor, with
-focus returned to where you were.
+you copied an hour ago, press Enter, and it's back on your clipboard. Press Cmd+V to paste it.
 
 Text, rich text, images and copied file paths. Pinned favourites, and tabs you name yourself: file a
 copy into `work` or `sql` and it shows up under that tab. Pinning and filing are the same promise —
 anything pinned or in a tab is kept whatever the "last N" limit is, so it is still there at copy 501.
-Passwords and API keys detected and never recorded. History encrypted at rest. Later: sync to a paired phone over your LAN,
+Detected secrets are masked in the list, expire after five minutes, and cannot be pinned. History is encrypted at rest. Later: sync to a paired phone over your LAN,
 end-to-end encrypted, with no account and no cloud.
 
 ---
 
 ## Status
 
-**Design and plan stage — no application code yet.**
+The macOS app includes clipboard capture, search, encrypted history, tabs, pinning, private titles,
+and a local DMG installer. Automatic pasting, signed distribution, and other platforms are still planned.
 
 | Document | What it is |
 |---|---|
@@ -110,9 +110,15 @@ stones:
 - **Right click** — Open, **Keep the last…** (how many copies to keep), Quit.
 - **Cmd+Shift+V** — same as left click, from anywhere.
 
-In the palette: **↑↓** navigate · **⏎** copy · **⌘P** pin · **⌘⌫** delete · **esc** close. Pinned items
+In the palette: **↑↓** navigate · **⏎** copy · **⌘E** title · **⌘P** pin · **⌘⌫** delete · **esc** close. Pinned items
 sort to the top and are exempt from the count limit. Secrets cannot be pinned — they expire after five
 minutes by design.
+
+Choose **Add title**, a row's **Aa** button, or **⌘E** to label a clip. Titled clips show their title
+instead of their content or thumbnail, and search matches the title. **Reveal** shows the preview
+temporarily; reopening the palette hides it again. Clicking the row still copies the original content.
+Save an empty title to remove it. Titles are encrypted with the history and do not change secret expiry
+or retention rules.
 
 Signing, notarization, a login item and auto-update are Milestone 3.
 

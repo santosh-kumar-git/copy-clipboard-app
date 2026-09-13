@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcEventChannel } from '@cairn/protocol'
 
 /**
- * Spec §11 control 4. THIRTEEN methods, each with its channel written out as a string literal in the
+ * Spec §11 control 4. FIFTEEN methods, each with its channel written out as a string literal in the
  * call. There is deliberately no `invoke(channel, params)` and no `send`: a generic bridge means
  * every current and future main-process handler is reachable from any script that gets into the
  * page, and the whole decrypted history is one call behind those handlers.
@@ -45,9 +45,11 @@ contextBridge.exposeInMainWorld('cairn', {
   preview: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.preview', params)),
   pin: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.pin', params)),
   tag: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.tag', params)),
+  setTitle: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.title', params)),
   remove: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:history.remove', params)),
   copy: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:recall.copy', params)),
   close: () => unwrap(ipcRenderer.invoke('cairn:palette.close', {})),
+  paletteReady: (params: unknown) => unwrap(ipcRenderer.invoke('cairn:palette.ready', params)),
   securityStatus: () => unwrap(ipcRenderer.invoke('cairn:security.status', {})),
   onHistoryChanged: (cb: (payload: unknown) => void) => subscribe('cairn:history.changed', cb),
   onHotkeyStatus: (cb: (payload: unknown) => void) => subscribe('cairn:hotkey.status', cb),

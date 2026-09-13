@@ -92,6 +92,7 @@ export interface RepRef {
 export interface Item {
   readonly id: ItemId
   readonly kind: ItemKind
+  readonly title?: string | null
   readonly contentHash: ContentHash
   /** Masked at ingest. For a secret this is `AKIA••••A7QD`, never the raw value. */
   readonly preview: string
@@ -121,6 +122,7 @@ export interface Item {
 
 export interface ItemPatch {
   readonly updatedAt: number
+  readonly title?: string | null
   readonly pinned?: boolean
   readonly tags?: readonly string[]
   readonly expiresAt?: number | null
@@ -147,7 +149,7 @@ export interface ScoredItem {
   readonly item: Item
   readonly score: number
   /**
-   * FLAT array of alternating [start, end) UTF-16 offsets into `item.preview`, exactly as
+   * FLAT array of alternating [start, end) UTF-16 offsets into `item.title ?? item.preview`, exactly as
    * ufuzzy's `info.ranges[n]` produces it. NOT an array of pairs.
    */
   readonly ranges: readonly number[]

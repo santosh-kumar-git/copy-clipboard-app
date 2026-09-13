@@ -136,6 +136,21 @@ describe('labels', () => {
 })
 
 describe('PaletteState', () => {
+  it('keeps the selected row fully visible when an editor reduces the list height', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 20 }, (_, i) => makeItem(i)) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.setViewportHeight(200)
+    state.moveSelection('End')
+    await state.pending
+
+    expect(state.windowStart).toBe(16)
+    expect(state.selectedIndex).toBe(19)
+    state.setViewportHeight(352)
+    expect(state.windowStart).toBe(12)
+    state.dispose()
+  })
+
   it('loads a bounded window and never holds more than FETCH_SPAN previews', async () => {
     const fake = createFakeApi({ items: Array.from({ length: 500 }, (_, i) => makeItem(i)) })
     const state = new PaletteState({ api: fake.api, clock: createTestClock() })
@@ -198,7 +213,7 @@ describe('PaletteState', () => {
     expect(state.rowAt(0)?.preview).toBe('NEW')
   })
 
-  it('copies the selected item, toasts the honest M1 sentence, and closes after two seconds', async () => {
+  it('copies the selected item and expires the toast without sending a second close', async () => {
     const clock = createTestClock()
     const fake = createFakeApi({ items: [makeItem(1), makeItem(2)] })
     const state = new PaletteState({ api: fake.api, clock })
@@ -214,8 +229,67 @@ describe('PaletteState', () => {
     clock.advance(TOAST_MS - 1)
     expect(fake.closeCalls).toBe(0)
     clock.advance(1)
-    expect(fake.closeCalls).toBe(1)
+    expect(fake.closeCalls).toBe(0)
     expect(state.toast).toBe(null)
+  })
+
+  it('keeps a reopened palette open after the previous copy toast expires', async () => {
+    const clock = createTestClock()
+    const fake = createFakeApi({ items: [makeItem(1)] })
+    const state = new PaletteState({ api: fake.api, clock })
+    await state.start()
+    await state.recall()
+    clock.advance(100)
+
+    fake.emitPaletteShown({ shownAt: clock.now() })
+    await state.pending
+    await state.setQuery('new search')
+    clock.advance(TOAST_MS)
+
+    expect(fake.closeCalls).toBe(0)
+    expect(state.query).toBe('new search')
+    expect(state.toast).toBe(null)
+    state.dispose()
+  })
+
+  it('does not let an old copy timer clear a new warning after reopening', async () => {
+    const clock = createTestClock()
+    const fake = createFakeApi({ items: [makeItem(1)] })
+    const state = new PaletteState({ api: fake.api, clock })
+    await state.start()
+    await state.recall()
+
+    fake.emitPaletteShown({ shownAt: clock.now() })
+    await state.pending
+    fake.emitToast({ text: 'History is locked', tone: 'warn' })
+    clock.advance(TOAST_MS)
+
+    expect(state.toast).toEqual({ text: 'History is locked', tone: 'warn' })
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it('discards an old preview when a newer search has no selection', async () => {
+    const item = makeItem(1)
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'old preview', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    fake.deferred = true
+    const oldPreview = state.loadPreview()
+    const resolveOld = fake.pending.shift()!
+    fake.deferred = false
+    await state.setQuery('no matches')
+    expect(state.previewText).toBe('')
+
+    resolveOld()
+    await oldPreview
+
+    expect(state.selectedItem).toBe(null)
+    expect(state.previewText).toBe('')
+    state.dispose()
   })
 
   it('warns instead of lying when the copy IPC is rejected', async () => {
@@ -286,5 +360,129 @@ describe('rows with no text preview', () => {
     for (const n of [0, 1, 1023, 1024, 1e6, 1e9, 1e12]) {
       expect(formatBytes(n).length).toBeGreaterThan(1)
     }
+  })
+})
+
+describe('private titles', () => {
+  it('acknowledges reopening only after the hidden preview has been rendered', async () => {
+    let finishFrame!: () => void
+    const frame = new Promise<void>((resolve) => { finishFrame = resolve })
+    const item = makeItem(1, { title: 'Work login' })
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'synthetic-private-text', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock(), afterRender: () => frame })
+    await state.start()
+    await state.revealPreview()
+    fake.emitPaletteShown({ shownAt: 123 })
+
+    expect(state.previewText).toBe('')
+    expect(state.revealedItemId).toBe(null)
+    expect(fake.readyCalls).toEqual([])
+    finishFrame()
+    await state.pending
+    expect(state.contentHidden).toBe(true)
+    expect(fake.readyCalls).toEqual([{ shownAt: 123 }])
+    state.dispose()
+  })
+
+  it('does not dismiss a newer title edit when an older save completes', async () => {
+    const fake = createFakeApi({ items: [makeItem(1), makeItem(2)] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.openTitleEditing()
+    state.titleDraft = 'First title'
+    fake.deferred = true
+    const saving = state.commitTitle()
+    const finish = fake.pending.shift()!
+    state.selectedIndex = 1
+    state.openTitleEditing()
+    state.titleDraft = 'Second draft'
+    fake.deferred = false
+    finish()
+    await saving
+
+    expect(state.titleEditing).toBe(true)
+    expect(state.titleDraft).toBe('Second draft')
+    state.dispose()
+  })
+
+  it('does not fetch titled content until revealed and hides it again when reopened', async () => {
+    const item = makeItem(1, { title: 'Work login', preview: 'synthetic-private-text' })
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'synthetic-private-text', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+
+    expect(state.contentHidden).toBe(true)
+    expect(fake.previewCalls).toEqual([])
+    expect(state.previewText).toBe('')
+    await state.revealPreview()
+    expect(state.previewText).toBe('synthetic-private-text')
+    await state.recall()
+    expect(fake.copyCalls).toEqual([item.id])
+
+    fake.emitPaletteShown({ shownAt: 123 })
+    await state.pending
+    expect(state.contentHidden).toBe(true)
+    expect(state.previewText).toBe('')
+    expect(fake.previewCalls).toEqual([item.id])
+    state.dispose()
+  })
+
+  it('saves a title for the item being edited even if the selection changes', async () => {
+    const fake = createFakeApi({ items: [makeItem(1), makeItem(2)] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.openTitleEditing()
+    state.titleDraft = 'Work login'
+    state.selectedIndex = 1
+    await state.commitTitle()
+
+    expect(fake.titleCalls).toEqual([{ id: testItemId(1), title: 'Work login' }])
+    expect(fake.items[0]?.title).toBe('Work login')
+    expect(state.titleEditing).toBe(false)
+    state.dispose()
+  })
+
+  it('allows clearing a title and keeps the editor open when saving fails', async () => {
+    const fake = createFakeApi({ items: [makeItem(1, { title: 'Work login' })] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.openTitleEditing()
+    expect(state.titleDraft).toBe('Work login')
+    state.titleDraft = ''
+    fake.failTitle = true
+    await state.commitTitle()
+    expect(state.titleEditing).toBe(true)
+    expect(state.toast?.tone).toBe('warn')
+
+    fake.failTitle = false
+    await state.commitTitle()
+    expect(fake.items[0]?.title).toBe(null)
+    expect(state.titleEditing).toBe(false)
+    state.dispose()
+  })
+
+  it('discards a pending reveal when the user hides content', async () => {
+    const item = makeItem(1, { title: 'Work login' })
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'synthetic-private-text', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    fake.deferred = true
+    const revealing = state.revealPreview()
+    const resolve = fake.pending.shift()!
+    state.hidePreview()
+    resolve()
+    await revealing
+    expect(state.contentHidden).toBe(true)
+    expect(state.previewText).toBe('')
+    state.dispose()
   })
 })

@@ -48,6 +48,7 @@ function build(over: {
   failEviction?: boolean
   previewsEvicted?: boolean
   reloadedItems?: number
+  writeResult?: Promise<ReturnType<typeof ok<{ changeToken: string }>>>
 } = {}) {
   const clock = createTestClock()
   const agentRequests: { method: string; params: unknown }[] = []
@@ -65,7 +66,7 @@ function build(over: {
         return ok({ bound: over.registerBound ?? true, accelerator: (params as { accelerator: string }).accelerator })
       }
       if (method === 'hotkey.unregister') return ok({ bound: false })
-      if (method === 'write') return ok({ changeToken: '4711' })
+      if (method === 'write') return over.writeResult ?? ok({ changeToken: '4711' })
       if (method === 'watch.start') return ok({ watching: true, intervalMs: 500 })
       if (method === 'watch.stop') return ok({ watching: false })
       if (method === 'shutdown') return ok({ bye: true })
@@ -125,6 +126,7 @@ function build(over: {
   const paletteCalls: string[] = []
   let visible = false
   const palette = {
+    ready: () => true,
     show: () => { visible = true; paletteCalls.push('show') },
     hide: () => { visible = false; paletteCalls.push('hide') },
     isVisible: () => visible,
@@ -200,7 +202,7 @@ describe('start', () => {
     expect(r).toEqual({ ok: true, value: { accelerator: 'Cmd+Shift+V', hotkeyStatus: 'active' } })
     expect(h.captureCalls).toEqual(['start'])
     expect(h.agentRequests.map((q) => q.method)).toContain('hotkey.register')
-    expect(h.registered.size).toBe(9)
+    expect(h.registered.size).toBe(11)
   })
 
   it('tells the renderer the hotkey status', async () => {
@@ -260,7 +262,7 @@ describe('start', () => {
     await h.app.start()
 
     expect(channelsWhenDialogOpened).toContain('cairn:history.list')
-    expect(channelsWhenDialogOpened).toHaveLength(9)
+    expect(channelsWhenDialogOpened).toHaveLength(11)
     // Sanity: the dialog really does open after the slow startup work, so the race was real and
     // this test would have caught it rather than passing for the wrong reason.
     expect(agentStartedFirst).toBe(true)
@@ -268,6 +270,15 @@ describe('start', () => {
 })
 
 describe('the hotkey → palette path', () => {
+  it('explicit opening refreshes a visible palette instead of toggling it closed', async () => {
+    const h = build()
+    await h.app.start()
+    h.app.showPalette()
+    h.app.showPalette()
+    expect(h.paletteCalls).toEqual(['show', 'show'])
+    expect(h.sent.filter(([channel]) => channel === 'cairn:palette.shown')).toHaveLength(2)
+  })
+
   it('shows the palette and tells the renderer when it was shown', async () => {
     const h = build()
     await h.app.start()
@@ -430,6 +441,22 @@ describe('the capture → history path', () => {
 })
 
 describe('recallCopy — the M1 Enter path', () => {
+  it('does not hide a newer opening when an earlier clipboard write finishes late', async () => {
+    let finishWrite!: (value: ReturnType<typeof ok<{ changeToken: string }>>) => void
+    const h = build({ writeResult: new Promise((resolve) => { finishWrite = resolve }) })
+    await h.app.start()
+    h.fireHotkey()
+    const copying = h.app.recallCopy(ID)
+    await Promise.resolve()
+    h.fireHotkey()
+    h.fireHotkey()
+    finishWrite(ok({ changeToken: '4711' }))
+    await copying
+
+    expect(h.paletteCalls).toEqual(['show', 'hide', 'show'])
+    expect(h.suppressed).toEqual(['4711'])
+  })
+
   it('writes the reps to the real clipboard, suppresses our own write, hides and toasts', async () => {
     const h = build()
     await h.app.start()

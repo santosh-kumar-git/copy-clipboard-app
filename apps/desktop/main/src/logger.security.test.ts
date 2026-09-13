@@ -152,7 +152,7 @@ describe('a REAL ingest through composeApp logs metadata only (spec §11 control
       hotkey: createHotkey({ agent, logger }),
       keyring: { getMode: () => 'os-keyring', probeBackend: () => ({ notes: [] }), lock: noop },
       store: { close: () => { store.close() } },
-      palette: { show: noop, hide: noop, isVisible: () => false, send: noop, destroy: noop },
+      palette: { show: noop, ready: () => false, hide: noop, isVisible: () => false, send: noop, destroy: noop },
       ipcMain: { handle: noop, removeHandler: noop },
       powerMonitor: { on: noop, getSystemIdleTime: () => 0 },
       clock,

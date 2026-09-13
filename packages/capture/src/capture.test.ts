@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import { createTestClock, fixturePath, type Candidate } from '@cairn/protocol'
 import * as privacy from '@cairn/privacy'
@@ -98,6 +98,60 @@ describe('capture', () => {
     expect(got).toHaveLength(1)
     expect(got[0]?.kind).toBe('image')
     expect(got[0]!.thumbnailJpeg!.length).toBeLessThanOrEqual(24 * 1024)
+  })
+
+  it('recovers queued and later captures after a malformed PNG without an idle waiter', async () => {
+    const { clock, agent, capture, got } = setup()
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } } }).png().toBuffer()
+    await capture.start()
+    agent.emitChanged(changed(410, [rep('image/png', 'public.png', png.subarray(0, 8))]))
+    clock.advance(700)
+    agent.emitChanged(changed(411, [rep('text/plain', 'public.utf8-plain-text', 'queued after malformed PNG')]))
+    clock.advance(700)
+
+    // Leave the queue unobserved until it emits, so an unhandled rejection fails the test.
+    await vi.waitFor(() => expect(got.map((c) => c.changeToken)).toEqual(['411']))
+    await expect(capture.whenIdle()).resolves.toBeUndefined()
+    expect(got[0]?.primaryText).toBe('queued after malformed PNG')
+
+    agent.emitChanged(changed(412, [rep('image/png', 'public.png', png)]))
+    clock.advance(700)
+    agent.emitChanged(changed(413, [rep('text/plain', 'public.utf8-plain-text', 'later text')]))
+    clock.advance(700)
+    await expect(capture.whenIdle()).resolves.toBeUndefined()
+    expect(got.map((c) => c.changeToken)).toEqual(['411', '412', '413'])
+    expect(Buffer.from(got[1]!.reps[0]!.bytes)).toEqual(png)
+    expect((await sharp(Buffer.from(got[1]!.thumbnailJpeg!)).metadata()).format).toBe('jpeg')
+    expect(got[2]?.primaryText).toBe('later text')
+    await capture.stop()
+  })
+
+  it('resolves whenIdle after a malformed PNG is the only capture', async () => {
+    const { clock, agent, capture, got } = setup()
+    await capture.start()
+    agent.emitChanged(changed(420, [rep('image/png', 'public.png', 'not a PNG')]))
+    clock.advance(700)
+    await expect(capture.whenIdle()).resolves.toBeUndefined()
+    expect(got).toEqual([])
+    await capture.stop()
+  })
+
+  it('drains queued captures after a malformed PNG on stop while discarding pending changes', async () => {
+    const { clock, agent, capture, got } = setup()
+    await capture.start()
+    agent.emitChanged(changed(430, [rep('image/png', 'public.png', 'not a PNG')]))
+    clock.advance(700)
+    agent.emitChanged(changed(431, [rep('text/plain', 'public.utf8-plain-text', 'already queued')]))
+    clock.advance(700)
+    agent.emitChanged(changed(432, [rep('text/plain', 'public.utf8-plain-text', 'still debouncing')]))
+
+    await capture.stop()
+    agent.emitChanged(changed(433, [rep('text/plain', 'public.utf8-plain-text', 'after stop')]))
+    expect(clock.pending).toBe(0)
+    clock.advance(700)
+    await expect(capture.whenIdle()).resolves.toBeUndefined()
+    expect(got.map((c) => c.changeToken)).toEqual(['431'])
+    expect(got[0]?.primaryText).toBe('already queued')
   })
 })
 

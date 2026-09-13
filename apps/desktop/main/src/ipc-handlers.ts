@@ -43,7 +43,7 @@ export interface IpcDeps {
   readonly history: History
   readonly preview: PreviewPort
   readonly recall: RecallPort
-  readonly palette: { hide(): void; isVisible(): boolean }
+  readonly palette: { hide(): void; isVisible(): boolean; ready(shownAt: number): boolean }
   readonly security: SecurityStatusPort
   readonly logger: Logger
 }
@@ -54,11 +54,13 @@ export interface IpcDeps {
  * the raw text a secret was — only how many secrets there were.
  */
 export function toItemSummary(item: Item, thumbnailDataUrl: string | null): ItemSummary {
+  const title = item.title ?? null
   return {
     id: item.id,
     kind: item.kind,
-    preview: item.preview,
-    previewTruncated: item.previewTruncated,
+    title,
+    preview: title === null ? item.preview : '',
+    previewTruncated: title === null ? item.previewTruncated : false,
     flags: [...item.flags],
     maskedSpanCount: item.maskSpans.length,
     sourceAppName: item.sourceApp?.name ?? null,
@@ -68,7 +70,7 @@ export function toItemSummary(item: Item, thumbnailDataUrl: string | null): Item
     // Tabs are user-authored, so unlike everything else here they cross the boundary verbatim.
     tags: [...(item.tags ?? [])],
     expiresAt: item.expiresAt,
-    thumbnailDataUrl,
+    thumbnailDataUrl: title === null ? thumbnailDataUrl : null,
   } as ItemSummary
 }
 
@@ -120,6 +122,10 @@ const HANDLERS: Record<IpcRequestChannel, Handler> = {
     const res = await deps.history.tag(p.id as ItemId, p.tag, p.tagged)
     return res.ok ? ok({ tags: [...res.value.tags] }) : res
   },
+  'cairn:history.title': async (params, deps) => {
+    const p = params as { id: string; title: string | null }
+    return await deps.history.setTitle(p.id as ItemId, p.title)
+  },
   'cairn:history.remove': async (params, deps) =>
     await deps.history.remove((params as { id: string }).id as ItemId),
   'cairn:recall.copy': async (params, deps) =>
@@ -127,6 +133,10 @@ const HANDLERS: Record<IpcRequestChannel, Handler> = {
   'cairn:palette.close': async (_params, deps) => {
     deps.palette.hide()
     return ok({ closed: true as const })
+  },
+  'cairn:palette.ready': async (params, deps) => {
+    const p = params as { shownAt: number }
+    return ok({ ready: deps.palette.ready(p.shownAt) })
   },
   'cairn:security.status': async (_params, deps) => {
     const s = deps.security.status()

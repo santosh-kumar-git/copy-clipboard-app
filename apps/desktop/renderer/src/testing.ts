@@ -10,6 +10,7 @@ export function makeItem(n: number, over: Partial<ItemSummary> = {}): ItemSummar
   return {
     id: testItemId(n),
     kind: 'text',
+    title: null,
     preview: `item ${n}`,
     previewTruncated: false,
     flags: [],
@@ -39,6 +40,9 @@ export interface FakeApi {
   readonly copyCalls: string[]
   readonly pinCalls: { id: string; pinned: boolean }[]
   readonly tagCalls: { id: string; tag: string; tagged: boolean }[]
+  readonly titleCalls: { id: string; title: string | null }[]
+  readonly readyCalls: { shownAt: number }[]
+  failTitle: boolean
   readonly removeCalls: string[]
   /** Rejects `tag` with this code, so a test can drive the E_TAG_LIMIT toast. */
   failTagWith: string | null
@@ -88,6 +92,9 @@ export function createFakeApi(
     copyCalls: [],
     pinCalls: [],
     tagCalls: [],
+    titleCalls: [],
+    readyCalls: [],
+    failTitle: false,
     failTagWith: null,
     removeCalls: [],
     closeCalls: 0,
@@ -173,6 +180,13 @@ export function createFakeApi(
       })
       return settle({ tags })
     },
+    setTitle: (params) => {
+      fake.titleCalls.push(params)
+      if (fake.failTitle) return Promise.reject(new Error('E_STORE_IO'))
+      const title = params.title?.replace(/\s+/g, ' ').trim() || null
+      fake.items = fake.items.map((it) => it.id === params.id ? { ...it, title } : it)
+      return settle({ title })
+    },
     remove: (params) => {
       fake.removeCalls.push(params.id)
       return settle({ removed: true })
@@ -185,6 +199,10 @@ export function createFakeApi(
     close: () => {
       fake.closeCalls += 1
       return settle({ closed: true as const })
+    },
+    paletteReady: (params) => {
+      fake.readyCalls.push(params)
+      return settle({ ready: true })
     },
     securityStatus: () =>
       settle({

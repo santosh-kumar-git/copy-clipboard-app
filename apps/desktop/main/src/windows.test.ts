@@ -13,6 +13,7 @@ import {
   type HardenableSession,
   type NavGuardTarget,
   type PaletteWindowOptions,
+  type PaletteController,
 } from './windows'
 
 const silentLogger = (): Logger => {
@@ -24,6 +25,7 @@ interface Recorded {
   readonly ctorOptions: PaletteWindowOptions[]
   readonly alwaysOnTop: unknown[][]
   readonly visibleOnAllWorkspaces: unknown[][]
+  readonly bounds: { x: number; y: number; width: number; height: number }[]
   readonly loadedFiles: string[]
   readonly loadedUrls: string[]
   readonly sent: [string, unknown][]
@@ -32,6 +34,8 @@ interface Recorded {
   shown: number
   hidden: number
   destroyed: number
+  focused: boolean
+  blur: () => void
 }
 
 function fakeBrowserWindow(): { Ctor: new (o: PaletteWindowOptions) => BrowserWindowLike; rec: Recorded } {
@@ -39,6 +43,7 @@ function fakeBrowserWindow(): { Ctor: new (o: PaletteWindowOptions) => BrowserWi
     ctorOptions: [],
     alwaysOnTop: [],
     visibleOnAllWorkspaces: [],
+    bounds: [],
     loadedFiles: [],
     loadedUrls: [],
     sent: [],
@@ -47,6 +52,8 @@ function fakeBrowserWindow(): { Ctor: new (o: PaletteWindowOptions) => BrowserWi
     shown: 0,
     hidden: 0,
     destroyed: 0,
+    focused: false,
+    blur: () => {},
   }
   class Fake {
     readonly webContents: unknown
@@ -59,20 +66,42 @@ function fakeBrowserWindow(): { Ctor: new (o: PaletteWindowOptions) => BrowserWi
         setWindowOpenHandler: (h: (d: { url: string }) => { action: 'deny' }) => { rec.windowOpenHandler = h },
         send: (channel: string, payload: unknown) => { rec.sent.push([channel, payload]) },
         isDestroyed: () => rec.destroyed > 0,
+        setBackgroundThrottling: () => {},
       }
     }
     setAlwaysOnTop(...args: unknown[]): void { rec.alwaysOnTop.push(args) }
     setVisibleOnAllWorkspaces(...args: unknown[]): void { rec.visibleOnAllWorkspaces.push(args) }
+    setBounds(bounds: { x: number; y: number; width: number; height: number }): void {
+      rec.bounds.push(bounds)
+    }
+    on(event: 'blur', cb: () => void): void { if (event === 'blur') rec.blur = cb }
     loadFile(p: string): Promise<void> { rec.loadedFiles.push(p); return Promise.resolve() }
     loadURL(u: string): Promise<void> { rec.loadedUrls.push(u); return Promise.resolve() }
     show(): void { this.visible = true; rec.shown += 1 }
-    hide(): void { this.visible = false; rec.hidden += 1 }
-    focus(): void {}
+    hide(): void {
+      rec.focused = false
+      rec.blur()
+      this.visible = false
+      rec.hidden += 1
+    }
+    focus(): void { rec.focused = true }
+    isFocused(): boolean { return rec.focused }
     isVisible(): boolean { return this.visible }
     isDestroyed(): boolean { return rec.destroyed > 0 }
     destroy(): void { rec.destroyed += 1 }
   }
   return { Ctor: Fake as unknown as new (o: PaletteWindowOptions) => BrowserWindowLike, rec }
+}
+
+const screen = {
+  getCursorScreenPoint: () => ({ x: 300, y: 200 }),
+  getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 30, width: 1440, height: 870 } }),
+}
+
+function openPalette(palette: PaletteController, shownAt = 1): void {
+  palette.show()
+  palette.send('cairn:palette.shown', { shownAt })
+  expect(palette.ready(shownAt)).toBe(true)
 }
 
 describe('paletteWindowOptions', () => {
@@ -188,6 +217,7 @@ describe('createPaletteWindow', () => {
     const { Ctor, rec } = fakeBrowserWindow()
     createPaletteWindow({
       BrowserWindowCtor: Ctor,
+      screen,
       mode: 'packaged',
       preloadPath: '/tmp/preload.js',
       rendererIndexPath: '/tmp/renderer/index.html',
@@ -215,6 +245,7 @@ describe('createPaletteWindow', () => {
     const { Ctor, rec } = fakeBrowserWindow()
     createPaletteWindow({
       BrowserWindowCtor: Ctor,
+      screen,
       mode: 'packaged',
       preloadPath: '/tmp/preload.js',
       rendererIndexPath: '/tmp/renderer/index.html',
@@ -231,6 +262,7 @@ describe('createPaletteWindow', () => {
     const { Ctor, rec } = fakeBrowserWindow()
     const palette = createPaletteWindow({
       BrowserWindowCtor: Ctor,
+      screen,
       mode: 'packaged',
       preloadPath: '/tmp/preload.js',
       rendererIndexPath: '/tmp/renderer/index.html',
@@ -240,7 +272,7 @@ describe('createPaletteWindow', () => {
     })
     await Promise.resolve()
     expect(palette.isVisible()).toBe(false)
-    palette.show()
+    openPalette(palette)
     expect(palette.isVisible()).toBe(true)
     palette.send('cairn:toast', { text: 'Copied — press Cmd+V', tone: 'info' })
     palette.hide()
@@ -249,13 +281,14 @@ describe('createPaletteWindow', () => {
     expect(rec.shown).toBe(1)
     expect(rec.hidden).toBe(1)
     expect(rec.destroyed).toBe(1)
-    expect(rec.sent).toEqual([['cairn:toast', { text: 'Copied — press Cmd+V', tone: 'info' }]])
+    expect(rec.sent).toContainEqual(['cairn:toast', { text: 'Copied — press Cmd+V', tone: 'info' }])
   })
 
   it('send after destroy is a no-op instead of a crash', async () => {
     const { Ctor, rec } = fakeBrowserWindow()
     const palette = createPaletteWindow({
       BrowserWindowCtor: Ctor,
+      screen,
       mode: 'packaged',
       preloadPath: '/tmp/preload.js',
       rendererIndexPath: '/tmp/renderer/index.html',
@@ -267,5 +300,102 @@ describe('createPaletteWindow', () => {
     palette.destroy()
     palette.send('cairn:toast', { text: 'late', tone: 'info' })
     expect(rec.sent).toEqual([])
+  })
+
+  it('repositions on the display under the pointer on every opening, including negative coordinates', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    let pointer = { x: 300, y: 200 }
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor,
+      screen: {
+        getCursorScreenPoint: () => pointer,
+        getDisplayNearestPoint: (point: { x: number; y: number }) => ({
+          workArea: point.x < 0
+            ? { x: -1920, y: -200, width: 1920, height: 1080 }
+            : { x: 0, y: 30, width: 1440, height: 870 },
+        }),
+      },
+      mode: 'packaged',
+      preloadPath: '/tmp/preload.js',
+      rendererIndexPath: '/tmp/renderer/index.html',
+      env: {},
+      clock: createTestClock(),
+      logger: silentLogger(),
+    })
+
+    openPalette(palette)
+    palette.hide()
+    pointer = { x: -1500, y: 100 }
+    openPalette(palette, 2)
+
+    expect(rec.bounds).toEqual([
+      { x: 360, y: 141, width: 720, height: 648 },
+      { x: -1320, y: 16, width: 720, height: 648 },
+    ])
+    expect(rec.visibleOnAllWorkspaces.at(-1)).toEqual([
+      true, { visibleOnFullScreen: true, skipTransformProcessType: true },
+    ])
+  })
+
+  it('fits a small display work area instead of putting controls offscreen', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor,
+      screen: {
+        ...screen,
+        getDisplayNearestPoint: () => ({ workArea: { x: 1440, y: 24, width: 640, height: 480 } }),
+      },
+      mode: 'packaged',
+      preloadPath: '/tmp/preload.js',
+      rendererIndexPath: '/tmp/renderer/index.html',
+      env: {},
+      clock: createTestClock(),
+      logger: silentLogger(),
+    })
+
+    openPalette(palette)
+
+    expect(rec.bounds).toEqual([{ x: 1456, y: 40, width: 608, height: 448 }])
+  })
+
+  it('dismisses native focus loss once and ignores old blur after refocusing', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    openPalette(palette)
+    rec.focused = false
+    rec.blur()
+    expect(palette.isVisible()).toBe(false)
+    expect(rec.hidden).toBe(1)
+
+    openPalette(palette, 2)
+    rec.blur()
+    expect(palette.isVisible()).toBe(true)
+    palette.hide()
+    palette.hide()
+    expect(rec.hidden).toBe(2)
+  })
+
+  it('waits for the matching renderer reset before making a prepared window visible', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    palette.show()
+    palette.send('cairn:palette.shown', { shownAt: 1 })
+    expect(rec.shown).toBe(0)
+    palette.hide()
+    palette.show()
+    palette.send('cairn:palette.shown', { shownAt: 2 })
+    expect(palette.ready(1)).toBe(false)
+    expect(rec.shown).toBe(0)
+    expect(palette.ready(2)).toBe(true)
+    expect(rec.shown).toBe(1)
+    expect(palette.ready(2)).toBe(false)
   })
 })

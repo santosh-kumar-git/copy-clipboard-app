@@ -81,6 +81,7 @@ export interface CairnApp {
   stop(): Promise<void>
   /** Show the palette if hidden, hide it if shown. What the hot key and the tray icon both call. */
   togglePalette(): void
+  showPalette(): void
   /** How many copies are currently kept. Read by the tray so its tick matches the live value. */
   historyLimit(): number
   /** Persists a new limit and applies it immediately, deleting anything now over the line. */
@@ -134,6 +135,8 @@ export function composeApp(deps: ComposeDeps): CairnApp {
   /** True between a passphrase-mode screen lock and the next unlock, so the user is told why the
    *  history went away instead of being shown a silently empty palette. */
   let relockedOnScreenLock = false
+  let paletteOpening = 0
+  let lastShownAt = 0
 
   /**
    * Re-reads the encrypted store when the preview cache has been evicted.
@@ -159,23 +162,15 @@ export function composeApp(deps: ComposeDeps): CairnApp {
     logger.info('history.previews-reloaded', { count: reloaded.value.items })
   }
 
-  /**
-   * The single way the palette opens. Both entry points — the global hot key and the menu bar icon
-   * — go through here, because "show the window" is only half of it: the renderer reloads its list
-   * on `palette.shown`, so an entry point that skips the event opens a stale palette.
-   *
-   * The window is shown FIRST and the event sent after the reload, so the palette never feels laggy
-   * on the hot key: the renderer reloads its list when `palette.shown` arrives, which is the point
-   * at which the previews have to be back.
-   */
-  const togglePalette = (): void => {
-    if (palette.isVisible()) {
-      palette.hide()
-      return
-    }
+  // Prepare the window, restore previews, then let the renderer acknowledge a private first frame.
+  const showPalette = (): void => {
+    const opening = ++paletteOpening
+    const shownAt = Math.max(clock.now(), lastShownAt + 1)
+    lastShownAt = shownAt
     palette.show()
     const announce = (): void => {
-      sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt: clock.now() }, logger)
+      if (opening !== paletteOpening || !palette.isVisible()) return
+      sendIpcEvent(paletteTarget, 'cairn:palette.shown', { shownAt }, logger)
     }
     // The common path stays SYNCHRONOUS. Deferring the event by a microtask on every open would make
     // every caller — and every test — care about promise timing for no benefit; only the evicted
@@ -185,6 +180,11 @@ export function composeApp(deps: ComposeDeps): CairnApp {
       return
     }
     void ensurePreviews().then(announce)
+  }
+
+  const togglePalette = (): void => {
+    if (palette.isVisible()) palette.hide()
+    else showPalette()
   }
 
   /**
@@ -234,6 +234,7 @@ export function composeApp(deps: ComposeDeps): CairnApp {
   const recallCopy = async (
     id: ItemId,
   ): Promise<Result<{ result: 'copied-manual'; reason: 'user-preference' }>> => {
+    const opening = paletteOpening
     const resolved = await history.resolveReps(id)
     if (!resolved.ok) return resolved
     if (resolved.value.length === 0) {
@@ -253,8 +254,10 @@ export function composeApp(deps: ComposeDeps): CairnApp {
     // BEFORE hiding, and before anything can await: the agent's 500 ms poll must never see our own
     // write as a new clipboard item, or every recall doubles the history.
     capture.suppressToken(write.value.changeToken)
-    palette.hide()
-    sendIpcEvent(paletteTarget, 'cairn:toast', { text: TOAST_COPIED_MANUAL, tone: 'info' }, logger)
+    if (opening === paletteOpening) {
+      palette.hide()
+      sendIpcEvent(paletteTarget, 'cairn:toast', { text: TOAST_COPIED_MANUAL, tone: 'info' }, logger)
+    }
     logger.info('recall.copied', { itemId: id, repCount: resolved.value.length })
     return ok({ result: 'copied-manual' as const, reason: 'user-preference' as const })
   }
@@ -302,6 +305,7 @@ export function composeApp(deps: ComposeDeps): CairnApp {
 
   return {
     togglePalette,
+    showPalette,
 
     historyLimit() {
       return config.retention.maxItems
@@ -336,7 +340,11 @@ export function composeApp(deps: ComposeDeps): CairnApp {
         history,
         preview: { preview: previewText },
         recall: { copy: recallCopy },
-        palette: { hide: () => palette.hide(), isVisible: () => palette.isVisible() },
+        palette: {
+          hide: () => palette.hide(),
+          isVisible: () => palette.isVisible(),
+          ready: (shownAt) => palette.ready(shownAt),
+        },
         security: { status: securityStatus },
         logger,
       })

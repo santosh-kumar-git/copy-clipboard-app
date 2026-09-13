@@ -45,6 +45,7 @@ const build = (over: { empty?: boolean; historyLimit?: number } = {}) => {
   const icon = fakeIcon(over.empty ?? false)
   const tray = fakeTray()
   const onToggle = vi.fn()
+  const onOpen = vi.fn()
   const onSetHistoryLimit = vi.fn()
   const onQuit = vi.fn()
   const menus: readonly unknown[][] = []
@@ -55,11 +56,12 @@ const build = (over: { empty?: boolean; historyLimit?: number } = {}) => {
     accelerator: 'Cmd+Shift+V',
     historyLimit: () => over.historyLimit ?? 500,
     onToggle,
+    onOpen,
     onSetHistoryLimit,
     onQuit,
     logger: silentLogger,
   })
-  return { icon, tray, onToggle, onSetHistoryLimit, onQuit, menus, result }
+  return { icon, tray, onToggle, onOpen, onSetHistoryLimit, onQuit, menus, result }
 }
 
 describe('trayMenuTemplate', () => {
@@ -158,12 +160,13 @@ describe('createTray', () => {
     expect(tray.tooltip).toBe(TRAY_TOOLTIP)
   })
 
-  it('wires the menu items to the same callbacks as the clicks', () => {
-    const { tray, menus, onToggle, onQuit } = build()
+  it('opens explicitly from the menu without toggling a visible palette closed', () => {
+    const { tray, menus, onToggle, onOpen, onQuit } = build()
     tray.handlers.get('right-click')?.()   // the menu is built on demand, not at startup
     const template = menus[0] as { label?: string; click?: () => void }[]
     template[0]?.click?.()
-    expect(onToggle).toHaveBeenCalledTimes(1)
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    expect(onToggle).not.toHaveBeenCalled()
     template[4]?.click?.()
     expect(onQuit).toHaveBeenCalledTimes(1)
   })
@@ -185,6 +188,7 @@ describe('createTray', () => {
       accelerator: 'Cmd+Shift+V',
       historyLimit: () => limit,
       onToggle: () => {},
+      onOpen: () => {},
       onSetHistoryLimit: () => {},
       onQuit: () => {},
       logger: silentLogger,

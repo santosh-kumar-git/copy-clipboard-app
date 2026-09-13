@@ -40,6 +40,7 @@ export const RETENTION_MAX_BYTES = 512 * 1024 * 1024
 export const SEARCH_INDEX_DEFAULT = 500
 export const SEARCH_INDEX_HARD_CAP = 2_000
 export const PREVIEW_MAX_CHARS = 512
+export const TITLE_MAX_CHARS = 120
 /** Tabs (§5.8). A tab IS a tag: there is no separate tab registry, so a tab exists exactly as long
  *  as an item carries its name and cannot be orphaned by a delete or an eviction. */
 export const TAG_MAX_CHARS = 24
@@ -57,6 +58,10 @@ export const SCRYPT_PARAMS = { N: 2 ** 17, r: 8, p: 1, maxmem: 192 * 1024 * 1024
  */
 export function normalizeTag(raw: string): string {
   return raw.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, TAG_MAX_CHARS).trim()
+}
+
+export function normalizeTitle(raw: string | null): string | null {
+  return raw?.replace(/\s+/g, ' ').trim() || null
 }
 
 /** The mime the macOS agent emits for Chrome's `org.chromium.source-url` rider. Frozen here so the

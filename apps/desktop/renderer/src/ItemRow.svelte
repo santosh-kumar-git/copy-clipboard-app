@@ -18,12 +18,14 @@
     onpick: () => void
     onpin: () => void
     ontag: () => void
+    ontitle: () => void
     ondelete: () => void
   }
-  let { item, selected, ranges, top, nowMs, onpick, onpin, ontag, ondelete }: Props = $props()
+  let { item, selected, ranges, top, nowMs, onpick, onpin, ontag, ontitle, ondelete }: Props = $props()
 
-  const segments = $derived(highlightSegments(item.preview, ranges))
-  const thumbnail = $derived(safeThumbnailSrc(item.thumbnailDataUrl))
+  const label = $derived(item.title ?? item.preview)
+  const segments = $derived(highlightSegments(label, ranges))
+  const thumbnail = $derived(item.title == null ? safeThumbnailSrc(item.thumbnailDataUrl) : null)
   const expiry = $derived(secretExpiryLabel(item.expiresAt, nowMs))
 
   /** A row action must not also count as picking the row, and must not steal focus from the search
@@ -54,7 +56,7 @@
   {#if thumbnail !== null}
     <img class="thumb" src={thumbnail} alt="" width="32" height="32" />
   {/if}
-  {#if item.preview.length === 0}
+  {#if label.length === 0}
     <!-- An image has no text preview and, until thumbnails are actually served, no thumbnail
          either — so the row rendered completely blank, which looked exactly like the evicted
          preview-cache bug. Describing the item keeps "blank row" meaning "something is wrong". -->
@@ -64,6 +66,7 @@
       >{#each segments as seg, i (i)}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span
     >
   {/if}
+  {#if item.title != null}<span class="badge badge-private">Hidden</span>{/if}
   {#each item.tags as tag (tag)}<span class="badge badge-tab">{tag}</span>{/each}
   {#if item.pinned}<span class="badge badge-pinned">Pinned</span>{/if}
   {#if item.flags.includes('secret')}
@@ -77,8 +80,16 @@
     <button
       type="button"
       class="row-btn"
+      title={item.title == null ? 'Add title (⌘E)' : 'Edit title (⌘E)'}
+      aria-label={`Edit title for ${label}`}
+      onmousedown={(e) => e.preventDefault()}
+      onclick={act(ontitle)}>Aa</button
+    >
+    <button
+      type="button"
+      class="row-btn"
       title={item.pinned ? 'Unpin' : 'Pin (never evicted)'}
-      aria-label={item.pinned ? `Unpin ${item.preview}` : `Pin ${item.preview}`}
+      aria-label={item.pinned ? `Unpin ${label}` : `Pin ${label}`}
       onmousedown={(e) => e.preventDefault()}
       onclick={act(onpin)}>{item.pinned ? '★' : '☆'}</button
     >
@@ -86,7 +97,7 @@
       type="button"
       class="row-btn"
       title="File into a tab (kept, never evicted)"
-      aria-label={`File ${item.preview} into a tab`}
+      aria-label={`File ${label} into a tab`}
       onmousedown={(e) => e.preventDefault()}
       onclick={act(ontag)}>#</button
     >
@@ -94,7 +105,7 @@
       type="button"
       class="row-btn row-btn-danger"
       title="Delete"
-      aria-label={`Delete ${item.preview}`}
+      aria-label={`Delete ${label}`}
       onmousedown={(e) => e.preventDefault()}
       onclick={act(ondelete)}>✕</button
     >

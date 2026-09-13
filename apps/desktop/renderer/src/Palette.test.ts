@@ -68,7 +68,7 @@ describe('the palette shell', () => {
     expect(state.shownAt).toBe(1_767_225_600_123)
   })
 
-  it('closes on Escape and on losing focus, which is what hides the window', async () => {
+  it('closes on Escape without sending a second close for a native blur', async () => {
     const fake = createFakeApi({ items: [makeItem(1)] })
     await render(fake)
 
@@ -77,7 +77,7 @@ describe('the palette shell', () => {
 
     window.dispatchEvent(new Event('blur'))
     flushSync()
-    expect(fake.closeCalls).toBe(2)
+    expect(fake.closeCalls).toBe(1)
   })
 
   it('shows the persistent hotkey row only when registration failed', async () => {
@@ -209,7 +209,7 @@ describe('the virtualised result list', () => {
 })
 
 describe('recall', () => {
-  it('puts the item on the clipboard, toasts the M1 sentence, then closes', async () => {
+  it('puts the item on the clipboard and clears its toast without closing again', async () => {
     const clock = createTestClock()
     const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
     await render(fake, clock)
@@ -228,8 +228,28 @@ describe('recall', () => {
     clock.advance(TOAST_MS)
     flushSync()
 
-    expect(fake.closeCalls).toBe(1)
+    expect(fake.closeCalls).toBe(0)
     expect(host.querySelector('[data-testid="toast"]')).toBe(null)
+  })
+
+  it('keeps the search usable when a row is copied and the palette is immediately reopened', async () => {
+    const clock = createTestClock()
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake, clock)
+    rows()[1]!.click()
+    await state.pending
+    expect(fake.copyCalls).toEqual([testItemId(1)])
+
+    fake.emitPaletteShown({ shownAt: clock.now() })
+    await state.pending
+    flushSync()
+    clock.advance(TOAST_MS + 100)
+    flushSync()
+
+    expect(fake.closeCalls).toBe(0)
+    expect(document.activeElement).toBe(host.querySelector('[data-testid="search"]'))
+    expect(rows()).toHaveLength(2)
+    state.dispose()
   })
 })
 
@@ -292,6 +312,7 @@ describe('the props shape', () => {
       onpick: true,
       onpin: true,
       ontag: true,
+      ontitle: true,
       ondelete: true,
     }
     expect(Object.keys(propKeys).sort()).toEqual([
@@ -301,6 +322,7 @@ describe('the props shape', () => {
       'onpick',
       'onpin',
       'ontag',
+      'ontitle',
       'ranges',
       'selected',
       'top',
@@ -325,7 +347,7 @@ describe('the action bar', () => {
   it('names every shortcut the palette actually handles', () => {
     // Guards the drift that makes hints worse than none: a key handled but not listed, or listed but
     // no longer handled.
-    const handled = ['↑↓', '⏎', '⌘P', '⌘T', '⌘⌫', 'esc']
+    const handled = ['↑↓', '⏎', '⌘E', '⌘P', '⌘T', '⌘⌫', 'esc']
     expect(SHORTCUT_HINTS.map((h) => h.keys)).toEqual(handled)
   })
 
@@ -348,14 +370,53 @@ describe('the action bar', () => {
     const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
     const state = await render(fake)
     const buttons = [...rows()[1]!.querySelectorAll<HTMLButtonElement>('.row-btn')]
-    expect(buttons.length).toBe(3)
+    expect(buttons.length).toBe(4)
 
-    buttons[2]?.click()
+    buttons.find((button) => button.title === 'Delete')?.click()
     await state.pending
     flushSync()
 
     // The click also moved the selection onto the row it acted on, so the two can never disagree.
     expect(fake.removeCalls).toEqual([testItemId(1)])
+  })
+})
+
+describe('title editing', () => {
+  it('opens with Cmd+E and saves with Enter without copying the item', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    const state = await render(fake)
+    press('e', { metaKey: true })
+    const field = host.querySelector<HTMLInputElement>('[data-testid="title-input"]')
+    expect(field).not.toBeNull()
+    expect(document.activeElement).toBe(field)
+
+    field!.value = 'Work login'
+    field!.dispatchEvent(new Event('input', { bubbles: true }))
+    field!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await state.pending
+    flushSync()
+
+    expect(fake.titleCalls).toEqual([{ id: testItemId(0), title: 'Work login' }])
+    expect(fake.copyCalls).toEqual([])
+    expect(host.querySelector('[data-testid="title-input"]')).toBe(null)
+    expect(rows()[0]?.textContent).toContain('Work login')
+    expect(host.querySelector('[data-testid="hidden-content"]')).not.toBe(null)
+    state.dispose()
+  })
+
+  it('cancels a title edit with Escape while keeping the palette open', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    const state = await render(fake)
+    press('e', { metaKey: true })
+    const field = host.querySelector<HTMLInputElement>('[data-testid="title-input"]')!
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    flushSync()
+
+    expect(state.titleEditing).toBe(false)
+    expect(fake.titleCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    expect(document.activeElement).toBe(host.querySelector('[data-testid="search"]'))
+    state.dispose()
   })
 })
 

@@ -1,4 +1,5 @@
 import type { Cancel, Clock, ItemKind, ItemSummary, Tab } from '@cairn/protocol'
+import { tick } from 'svelte'
 import {
   parseHistoryChanged,
   parseHotkeyStatus,
@@ -10,8 +11,7 @@ import {
   type ToastPayload,
 } from './api'
 
-/** Fixed row geometry. jsdom has no layout — `clientHeight` is always 0 and `scrollIntoView` does
- *  not exist — so nothing in the palette may be measured from the DOM. */
+/** Row height stays fixed; the number of visible rows follows the available list height. */
 export const ROW_HEIGHT_PX = 44
 export const VISIBLE_ROWS = 8
 export const OVERSCAN_ROWS = 2
@@ -21,7 +21,7 @@ export const SEARCH_LIMIT = 50
 export const TOAST_MS = 2_000
 
 /** What the action bar can do to the selected row. `null` is a hint with no button behind it. */
-export type PaletteAction = 'copy' | 'pin' | 'tab' | 'delete' | 'close'
+export type PaletteAction = 'copy' | 'title' | 'pin' | 'tab' | 'delete' | 'close'
 
 /**
  * The action bar. This started life as a row of grey text naming keyboard shortcuts, because pinning
@@ -37,6 +37,7 @@ export type PaletteAction = 'copy' | 'pin' | 'tab' | 'delete' | 'close'
 export const SHORTCUT_HINTS = [
   { keys: '↑↓', label: 'navigate', action: null },
   { keys: '⏎', label: 'copy', action: 'copy' },
+  { keys: '⌘E', label: 'title', action: 'title' },
   { keys: '⌘P', label: 'pin', action: 'pin' },
   { keys: '⌘T', label: 'tab', action: 'tab' },
   { keys: '⌘⌫', label: 'delete', action: 'delete' },
@@ -117,17 +118,17 @@ export function nextIndex(current: number, key: NavKey, total: number): number {
   }
 }
 
-export function windowStartFor(selected: number, windowStart: number, total: number): number {
-  const maxStart = Math.max(0, total - VISIBLE_ROWS)
+export function windowStartFor(selected: number, windowStart: number, total: number, visibleRows = VISIBLE_ROWS): number {
+  const maxStart = Math.max(0, total - visibleRows)
   let start = Math.min(Math.max(0, windowStart), maxStart)
   if (selected < start) start = selected
-  else if (selected >= start + VISIBLE_ROWS) start = selected - VISIBLE_ROWS + 1
+  else if (selected >= start + visibleRows) start = selected - visibleRows + 1
   return Math.max(0, Math.min(start, maxStart))
 }
 
-export function visibleRange(windowStart: number, total: number): { start: number; end: number } {
+export function visibleRange(windowStart: number, total: number, visibleRows = VISIBLE_ROWS): { start: number; end: number } {
   const start = Math.max(0, windowStart - OVERSCAN_ROWS)
-  const end = Math.max(start, Math.min(total, windowStart + VISIBLE_ROWS + OVERSCAN_ROWS))
+  const end = Math.max(start, Math.min(total, windowStart + visibleRows + OVERSCAN_ROWS))
   return { start, end }
 }
 
@@ -229,12 +230,14 @@ export interface VisibleRow {
 export interface PaletteDeps {
   readonly api: CairnBridge
   readonly clock: Clock
+  readonly afterRender?: () => Promise<void>
 }
 
 export class PaletteState {
   query = $state('')
   selectedIndex = $state(0)
   windowStart = $state(0)
+  viewportRows = $state(VISIBLE_ROWS)
   total = $state(0)
   mode: 'recent' | 'search' = $state('recent')
   hotkeyStatus: HotkeyStatus = $state('active')
@@ -252,6 +255,9 @@ export class PaletteState {
   /** The inline "file this into a tab" field. Open only while the user is typing a tab name. */
   tagging = $state(false)
   tagDraft = $state('')
+  titleEditing = $state(false)
+  titleDraft = $state('')
+  revealedItemId: string | null = $state(null)
   /** At most FETCH_SPAN summaries — the renderer never holds the whole history. */
   rows: (ItemSummary | null)[] = $state([])
   rowsOffset = $state(0)
@@ -265,13 +271,16 @@ export class PaletteState {
   #listSeq = 0
   #previewSeq = 0
   #cancelToast: Cancel | null = null
+  #titleItemId: string | null = null
+  #titleEditSeq = 0
+  #openingSeq = 0
 
   constructor(deps: PaletteDeps) {
     this.#deps = deps
   }
 
   visibleRows: VisibleRow[] = $derived.by(() => {
-    const { start, end } = visibleRange(this.windowStart, this.total)
+    const { start, end } = visibleRange(this.windowStart, this.total, this.viewportRows)
     const out: VisibleRow[] = []
     for (let i = start; i < end; i++) {
       out.push({
@@ -286,6 +295,11 @@ export class PaletteState {
 
   get selectedItem(): ItemSummary | null {
     return this.rowAt(this.selectedIndex)
+  }
+
+  get contentHidden(): boolean {
+    const item = this.selectedItem
+    return item?.title != null && this.revealedItemId !== item.id
   }
 
   /** What the empty list should say, which depends entirely on WHY it is empty. */
@@ -318,7 +332,7 @@ export class PaletteState {
       api.onToast((raw) => {
         const p = parseToast(raw)
         if (p === null) return
-        this.toast = p
+        this.#showToast(p)
       }),
       api.onHistoryChanged((raw) => {
         const p = parseHistoryChanged(raw)
@@ -328,27 +342,43 @@ export class PaletteState {
       api.onPaletteShown((raw) => {
         const p = parsePaletteShown(raw)
         if (p === null) return
+        const openingSeq = ++this.#openingSeq
         // Main re-shows the same window, so "opening the palette" is an event, not a mount.
         this.shownAt = p.shownAt
         this.query = ''
         this.mode = 'recent'
         this.selectedIndex = 0
         this.windowStart = 0
+        this.#cancelToast?.()
+        this.#cancelToast = null
         this.toast = null
         // The tab resets with the query, for the same reason: the palette is opened to find the thing
         // you just copied far more often than to return to a tab you were in an hour ago.
         this.activeTab = ALL_TAB
         this.closeTagging()
-        this.pending = this.reload()
+        this.closeTitleEditing()
+        this.hidePreview()
+        this.pending = this.reload().then(async () => {
+          await tick()
+          await this.#deps.afterRender?.()
+          if (openingSeq !== this.#openingSeq) return
+          try {
+            await api.paletteReady({ shownAt: p.shownAt })
+          } catch {
+            this.statusText = LOAD_FAILED_TEXT
+          }
+        })
       }),
     )
     await this.reload()
   }
 
   dispose(): void {
+    this.#openingSeq += 1
     for (const un of this.#unsubs.splice(0)) un()
     this.#cancelToast?.()
     this.#cancelToast = null
+    this.hidePreview()
   }
 
   async reload(): Promise<void> {
@@ -362,6 +392,7 @@ export class PaletteState {
   }
 
   async setQuery(q: string): Promise<void> {
+    this.hidePreview()
     this.query = q
     this.selectedIndex = 0
     this.windowStart = 0
@@ -389,20 +420,29 @@ export class PaletteState {
   }
 
   moveSelection(key: NavKey): void {
+    this.hidePreview()
     this.selectedIndex = nextIndex(this.selectedIndex, key, this.total)
-    this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total)
+    this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total, this.viewportRows)
     this.pending = Promise.all([this.ensureLoaded(), this.loadPreview()])
   }
 
   setScrollTop(px: number): void {
-    const maxStart = Math.max(0, this.total - VISIBLE_ROWS)
+    const maxStart = Math.max(0, this.total - this.viewportRows)
     this.windowStart = Math.max(0, Math.min(Math.floor(px / ROW_HEIGHT_PX), maxStart))
+    this.pending = this.ensureLoaded()
+  }
+
+  setViewportHeight(px: number): void {
+    const rows = Math.max(1, Math.floor(px / ROW_HEIGHT_PX))
+    if (rows === this.viewportRows) return
+    this.viewportRows = rows
+    this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total, rows)
     this.pending = this.ensureLoaded()
   }
 
   async ensureLoaded(): Promise<void> {
     if (this.mode !== 'recent') return
-    const { start, end } = visibleRange(this.windowStart, this.total)
+    const { start, end } = visibleRange(this.windowStart, this.total, this.viewportRows)
     if (start >= this.rowsOffset && end <= this.rowsOffset + this.rows.length) return
     await this.#fetchWindow(Math.max(0, start))
   }
@@ -433,13 +473,13 @@ export class PaletteState {
   }
 
   async loadPreview(): Promise<void> {
+    const seq = ++this.#previewSeq
     const item = this.selectedItem
-    if (item === null) {
+    if (item === null || this.contentHidden) {
       this.previewText = ''
       this.previewMime = 'text/plain'
       return
     }
-    const seq = ++this.#previewSeq
     try {
       const res = await this.#deps.api.preview({ id: item.id })
       if (seq !== this.#previewSeq) return
@@ -463,7 +503,9 @@ export class PaletteState {
       // Accessibility-denied degraded mode (spec §6).
       this.#showToast({ text: RECALL_TOAST_TEXT[res.reason], tone: 'info' })
       this.#cancelToast = this.#deps.clock.setTimeout(() => {
-        void this.close()
+        // Main already hides after copying; a delayed close would dismiss a newly opened palette.
+        this.toast = null
+        this.#cancelToast = null
       }, TOAST_MS)
     } catch {
       this.#showToast({ text: RECALL_FAILED_TEXT, tone: 'warn' })
@@ -495,6 +537,8 @@ export class PaletteState {
     this.selectedIndex = 0
     this.windowStart = 0
     this.closeTagging()
+    this.closeTitleEditing()
+    this.hidePreview()
     if (this.mode === 'search' && this.query.trim().length > 0) {
       await this.setQuery(this.query)
       return
@@ -506,6 +550,7 @@ export class PaletteState {
    *  exists because an item is in it, so typing a new name here is what creates one. */
   openTagging(): void {
     if (this.selectedItem === null) return
+    this.closeTitleEditing()
     this.tagging = true
     this.tagDraft = ''
   }
@@ -513,6 +558,59 @@ export class PaletteState {
   closeTagging(): void {
     this.tagging = false
     this.tagDraft = ''
+  }
+
+  openTitleEditing(): void {
+    const item = this.selectedItem
+    if (item === null) return
+    this.#titleEditSeq += 1
+    this.closeTagging()
+    this.#titleItemId = item.id
+    this.titleDraft = item.title ?? ''
+    this.titleEditing = true
+  }
+
+  closeTitleEditing(): void {
+    this.#titleEditSeq += 1
+    this.titleEditing = false
+    this.titleDraft = ''
+    this.#titleItemId = null
+  }
+
+  async commitTitle(): Promise<void> {
+    const id = this.#titleItemId
+    const editSeq = this.#titleEditSeq
+    if (id === null) return
+    const title = this.titleDraft.replace(/\s+/g, ' ').trim() || null
+    if (title !== null && title.length > 120) {
+      this.#showToast({ text: 'Keep the title to 120 characters', tone: 'warn' })
+      return
+    }
+    try {
+      await this.#deps.api.setTitle({ id, title })
+    } catch {
+      if (editSeq !== this.#titleEditSeq) return
+      this.#showToast({ text: 'Could not save the title. Try again.', tone: 'warn' })
+      return
+    }
+    if (editSeq !== this.#titleEditSeq) return
+    this.closeTitleEditing()
+    this.hidePreview()
+    await this.refresh()
+  }
+
+  async revealPreview(): Promise<void> {
+    const item = this.selectedItem
+    if (item === null) return
+    this.revealedItemId = item.id
+    await this.loadPreview()
+  }
+
+  hidePreview(): void {
+    this.revealedItemId = null
+    this.#previewSeq += 1
+    this.previewText = ''
+    this.previewMime = 'text/plain'
   }
 
   async commitTag(): Promise<void> {
@@ -559,6 +657,9 @@ export class PaletteState {
     switch (action) {
       case 'copy':
         return this.recall()
+      case 'title':
+        this.openTitleEditing()
+        return Promise.resolve()
       case 'pin':
         return this.togglePin()
       case 'tab':
@@ -584,9 +685,12 @@ export class PaletteState {
   }
 
   async close(): Promise<void> {
+    this.#openingSeq += 1
     this.#cancelToast?.()
     this.#cancelToast = null
     this.toast = null
+    this.closeTitleEditing()
+    this.hidePreview()
     await this.#deps.api.close()
   }
 

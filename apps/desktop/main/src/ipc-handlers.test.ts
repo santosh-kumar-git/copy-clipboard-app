@@ -84,13 +84,15 @@ interface Harness {
   readonly ipc: FakeIpc
   readonly events: string[]
   readonly domainCalls: string[]
+  readonly titles: { id: ItemId; title: string | null }[]
   readonly unregister: Unsub
 }
 
-function harness(over: { historyItems?: readonly Item[] } = {}): Harness {
+function harness(over: { historyItems?: readonly Item[]; readyResult?: boolean } = {}): Harness {
   const ipc = fakeIpcMain()
   const { logger, events } = silentLogger()
   const domainCalls: string[] = []
+  const titles: { id: ItemId; title: string | null }[] = []
   const items = over.historyItems ?? [item()]
 
   const history = {
@@ -114,6 +116,10 @@ function harness(over: { historyItems?: readonly Item[] } = {}): Harness {
     tag: async (id: ItemId, tag: string, tagged: boolean) => {
       domainCalls.push(`tag ${id} ${tag} ${String(tagged)}`)
       return ok({ tags: tagged ? [tag] : [] })
+    },
+    setTitle: async (id: ItemId, title: string | null) => {
+      titles.push({ id, title })
+      return ok({ title })
     },
     tabs: () => [{ tag: 'work', count: 1 }],
     pinnedCount: () => 0,
@@ -139,7 +145,14 @@ function harness(over: { historyItems?: readonly Item[] } = {}): Harness {
         return ok({ result: 'copied-manual' as const, reason: 'user-preference' as const })
       },
     },
-    palette: { hide: () => { domainCalls.push('hide') }, isVisible: () => true },
+    palette: {
+      hide: () => { domainCalls.push('hide') },
+      isVisible: () => true,
+      ready: (shownAt: number) => {
+        domainCalls.push(`ready ${shownAt}`)
+        return over.readyResult ?? true
+      },
+    },
     security: {
       status: () => ({
         keyringMode: 'os-keyring' as const,
@@ -151,7 +164,7 @@ function harness(over: { historyItems?: readonly Item[] } = {}): Harness {
     logger,
   })
 
-  return { ipc, events, domainCalls, unregister }
+  return { ipc, events, domainCalls, titles, unregister }
 }
 
 describe('registration', () => {
@@ -188,7 +201,7 @@ describe('registration', () => {
       history: {} as unknown as History,
       preview: { preview: async () => ok({ text: '', isHtmlSource: false, truncated: false }) },
       recall: { copy: async () => ok({ result: 'copied-manual' as const, reason: 'user-preference' as const }) },
-      palette: { hide: () => {}, isVisible: () => false },
+      palette: { hide: () => {}, isVisible: () => false, ready: () => false },
       security: { status: () => ({ keyringMode: 'locked' as const, encryptedAtRest: false, dataDirMode: '700', notes: [] }) },
       logger: silentLogger().logger,
     })).toThrow(/second handler/)
@@ -302,6 +315,25 @@ describe('the happy paths', () => {
     expect(h.domainCalls).toEqual(['hide'])
   })
 
+  it.each([true, false])('palette.ready forwards shownAt and preserves ready:%s', async (readyResult) => {
+    const h = harness({ readyResult })
+    const shownAt = 1_767_225_600_000
+    expect(await h.ipc.call('cairn:palette.ready', { shownAt })).toEqual({
+      ok: true, value: { ready: readyResult },
+    })
+    expect(h.domainCalls).toEqual([`ready ${shownAt}`])
+  })
+
+  it('rejects an invalid palette.ready timestamp before calling the palette', async () => {
+    const h = harness()
+    for (const shownAt of [undefined, null, '123', 1.5, NaN, Infinity]) {
+      expect(await h.ipc.call('cairn:palette.ready', { shownAt })).toMatchObject({
+        ok: false, code: 'E_IPC_REJECTED',
+      })
+    }
+    expect(h.domainCalls).toEqual([])
+  })
+
   it('security.status reports the honest at-rest sentence', async () => {
     const h = harness()
     const reply = await h.ipc.call('cairn:security.status', {}) as
@@ -329,7 +361,7 @@ describe('result validation — the outbound direction', () => {
       preview: { preview: async () => ok({ text: '', isHtmlSource: false, truncated: false }) },
       recall: { copy: async () => ok({ result: 'copied-manual' as const, reason: 'user-preference' as const }) },
       // A deliberately broken port: `closed: false` violates `z.literal(true)`.
-      palette: { hide: () => {}, isVisible: () => false },
+      palette: { hide: () => {}, isVisible: () => false, ready: () => false },
       security: {
         status: () => ({ keyringMode: 'nonsense', encryptedAtRest: true, dataDirMode: '700', notes: [] }) as never,
       },
@@ -349,7 +381,7 @@ describe('result validation — the outbound direction', () => {
       history: {} as unknown as History,
       preview: { preview: async () => { throw new Error('boom') } },
       recall: { copy: async () => ok({ result: 'copied-manual' as const, reason: 'user-preference' as const }) },
-      palette: { hide: () => {}, isVisible: () => false },
+      palette: { hide: () => {}, isVisible: () => false, ready: () => false },
       security: { status: () => ({ keyringMode: 'locked' as const, encryptedAtRest: false, dataDirMode: '700', notes: [] }) },
       logger,
     })
@@ -365,13 +397,59 @@ describe('toItemSummary', () => {
     const summary = toItemSummary(item(), null) as unknown as Record<string, unknown>
     expect(Object.keys(summary).sort()).toEqual([
       'byteLength', 'createdAt', 'expiresAt', 'flags', 'id', 'kind', 'maskedSpanCount', 'pinned',
-      'preview', 'previewTruncated', 'sourceAppName', 'tags', 'thumbnailDataUrl',
+      'preview', 'previewTruncated', 'sourceAppName', 'tags', 'thumbnailDataUrl', 'title',
     ])
   })
 
   it('carries a thumbnail as a data URL when one is supplied', () => {
     const summary = toItemSummary(item({ kind: 'image' }), 'data:image/jpeg;base64,/9j/AAA')
     expect(summary.thumbnailDataUrl).toBe('data:image/jpeg;base64,/9j/AAA')
+  })
+
+  it('redacts content and thumbnails from a titled summary but preserves title and privacy metadata', () => {
+    const summary = toItemSummary(item({ title: 'Credential', previewTruncated: true }), 'data:image/jpeg;base64,/9j/AAA')
+    expect(summary).toMatchObject({
+      title: 'Credential', preview: '', previewTruncated: false, thumbnailDataUrl: null,
+      flags: ['secret'], pinned: false, tags: [], expiresAt: 1_767_225_900_000,
+    })
+    expect(JSON.stringify(summary)).not.toContain('AKIA')
+    expect(toItemSummary(item(), null).title).toBeNull()
+  })
+})
+
+describe('title IPC', () => {
+  it('normalizes title updates and forwards null when clearing', async () => {
+    const h = harness()
+    expect(await h.ipc.call('cairn:history.title', { id: ID_A, title: ' My \n Alias ' })).toEqual({
+      ok: true, value: { title: 'My Alias' },
+    })
+    expect(await h.ipc.call('cairn:history.title', { id: ID_A, title: ' \t ' })).toEqual({
+      ok: true, value: { title: null },
+    })
+    expect(h.titles).toEqual([{ id: ID_A, title: 'My Alias' }, { id: ID_A, title: null }])
+  })
+
+  it('rejects invalid title input before reaching history', async () => {
+    const h = harness()
+    for (const title of [undefined, 42, {}, 'x'.repeat(121)]) {
+      expect(await h.ipc.call('cairn:history.title', { id: ID_A, title })).toMatchObject({
+        ok: false, code: 'E_IPC_REJECTED',
+      })
+    }
+    expect(h.titles).toEqual([])
+  })
+
+  it('redacts titled list/search results and fetches content only for an explicit preview request', async () => {
+    const h = harness({ historyItems: [item({ title: 'Credential' })] })
+    const listed = await h.ipc.call('cairn:history.list', { limit: 10, offset: 0 })
+    const searched = await h.ipc.call('cairn:history.search', { q: 'Credential', limit: 10 })
+    expect(listed).toMatchObject({ ok: true, value: { items: [{ title: 'Credential', preview: '', thumbnailDataUrl: null }] } })
+    expect(searched).toMatchObject({ ok: true, value: { results: [{ item: { title: 'Credential', preview: '' } }] } })
+    expect(JSON.stringify([listed, searched])).not.toContain('AKIA')
+    expect(h.domainCalls.some((call) => call.startsWith('preview'))).toBe(false)
+    expect(await h.ipc.call('cairn:history.preview', { id: ID_A })).toMatchObject({
+      ok: true, value: { text: '<b>hi</b>' },
+    })
   })
 })
 

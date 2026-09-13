@@ -38,9 +38,11 @@ const CALLS: readonly [string, unknown][] = [
   ['search', { q: 'x', limit: 50 }],
   ['preview', { id: 'i' }],
   ['pin', { id: 'i', pinned: true }],
+  ['setTitle', { id: 'i', title: 'Alias' }],
   ['remove', { id: 'i' }],
   ['copy', { id: 'i' }],
   ['close', undefined],
+  ['paletteReady', { shownAt: 1_767_225_600_000 }],
   ['securityStatus', undefined],
 ]
 
@@ -112,5 +114,11 @@ describe('the bridge unwraps the main process Result', () => {
       nextResult = { ok: true, value }
       expect(await api['list']!({})).toBe(value)
     }
+  })
+
+  it('returns an unmatched ready acknowledgment as a successful false result', async () => {
+    const api = await loadPreload()
+    nextResult = { ok: true, value: { ready: false } }
+    expect(await api['paletteReady']!({ shownAt: 123 })).toEqual({ ready: false })
   })
 })

@@ -9,6 +9,9 @@ target.textContent = ''
 
 const state = new PaletteState({
   api: window.cairn,
+  afterRender: () => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  }),
   // The renderer cannot import `systemClock` from @cairn/protocol (that would drag node:crypto into
   // the bundle), so this is the same two lines, inline. Tests inject createTestClock() instead.
   clock: {

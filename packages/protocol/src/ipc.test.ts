@@ -26,16 +26,18 @@ const summary = {
 }
 
 describe('the channel lists are frozen and complete', () => {
-  it('has nine request channels and four event channels, each with a schema', () => {
+  it('has eleven request channels and four event channels, each with a schema', () => {
     expect(IPC_REQUEST_CHANNELS).toEqual([
       'cairn:history.list',
       'cairn:history.search',
       'cairn:history.preview',
       'cairn:history.pin',
       'cairn:history.tag',
+      'cairn:history.title',
       'cairn:history.remove',
       'cairn:recall.copy',
       'cairn:palette.close',
+      'cairn:palette.ready',
       'cairn:security.status',
     ])
     expect(IPC_EVENT_CHANNELS).toEqual([
@@ -49,7 +51,7 @@ describe('the channel lists are frozen and complete', () => {
       expect(IpcRequestSchema[c].result).toBeDefined()
     }
     for (const c of IPC_EVENT_CHANNELS) expect(IpcEventSchema[c]).toBeDefined()
-    expect(Object.keys(IpcRequestSchema)).toHaveLength(9)
+    expect(Object.keys(IpcRequestSchema)).toHaveLength(11)
     expect(Object.keys(IpcEventSchema)).toHaveLength(4)
   })
 })
@@ -78,10 +80,10 @@ describe('inbound params are validated (main side)', () => {
 })
 
 describe('outbound results are validated (main side), and carry no bytes', () => {
-  it('ItemSummary has exactly thirteen keys, none of which can hold a body', () => {
+  it('ItemSummary exposes a title but no body or raw representations', () => {
     const keys = Object.keys(ItemSummarySchema.shape)
     expect(keys).toEqual([
-      'id', 'kind', 'preview', 'previewTruncated', 'flags', 'maskedSpanCount', 'sourceAppName',
+      'id', 'kind', 'title', 'preview', 'previewTruncated', 'flags', 'maskedSpanCount', 'sourceAppName',
       'byteLength', 'createdAt', 'pinned', 'tags', 'expiresAt', 'thumbnailDataUrl',
     ])
     for (const banned of ['bytes', 'reps', 'repRefs', 'blobId', 'raw', 'html', 'text']) {
@@ -107,6 +109,55 @@ describe('outbound results are validated (main side), and carry no bytes', () =>
     const result = IpcRequestSchema['cairn:recall.copy'].result
     expect(result.safeParse({ result: 'copied-manual', reason: 'user-preference' }).success).toBe(true)
     expect(result.safeParse({ result: 'copied-auto', reason: 'user-preference' }).success).toBe(false)
+  })
+})
+
+describe('item title contract', () => {
+  it('normalizes whitespace and case-preserving titles, and clears empty titles', () => {
+    const params = IpcRequestSchema['cairn:history.title'].params
+    expect(params.parse({ id: summary.id, title: '  My \n Work\tClip  ' })).toEqual({
+      id: summary.id, title: 'My Work Clip',
+    })
+    for (const title of ['', ' \n\t ', null]) {
+      expect(params.parse({ id: summary.id, title })).toEqual({ id: summary.id, title: null })
+    }
+    expect(params.parse({ id: summary.id, title: 'x'.repeat(120) }).title).toHaveLength(120)
+  })
+
+  it('rejects oversized, missing, non-string titles and invalid ids', () => {
+    const params = IpcRequestSchema['cairn:history.title'].params
+    for (const title of ['x'.repeat(121), 42, {}, undefined]) {
+      expect(params.safeParse({ id: summary.id, title }).success).toBe(false)
+    }
+    expect(params.safeParse({ id: 'invalid', title: 'Work' }).success).toBe(false)
+  })
+
+  it('defaults a legacy summary title to null and validates titled results', () => {
+    expect(ItemSummarySchema.parse(summary).title).toBeNull()
+    expect(ItemSummarySchema.parse({ ...summary, title: 'Work' }).title).toBe('Work')
+    expect(ItemSummarySchema.safeParse({ ...summary, title: 'x'.repeat(121) }).success).toBe(false)
+    const result = IpcRequestSchema['cairn:history.title'].result
+    expect(result.parse({ title: null })).toEqual({ title: null })
+    expect(result.parse({ title: 'Work' })).toEqual({ title: 'Work' })
+  })
+})
+
+describe('palette ready contract', () => {
+  it('accepts an integer shownAt and preserves either ready result', () => {
+    const schema = IpcRequestSchema['cairn:palette.ready']
+    expect(schema.params.parse({ shownAt: 1_767_225_600_000 })).toEqual({ shownAt: 1_767_225_600_000 })
+    expect(schema.result.parse({ ready: true })).toEqual({ ready: true })
+    expect(schema.result.parse({ ready: false })).toEqual({ ready: false })
+  })
+
+  it('rejects malformed timestamps and non-boolean acknowledgments', () => {
+    const schema = IpcRequestSchema['cairn:palette.ready']
+    for (const shownAt of [undefined, null, '123', 1.5, NaN, Infinity]) {
+      expect(schema.params.safeParse({ shownAt }).success).toBe(false)
+    }
+    for (const ready of [undefined, null, 'true', 1]) {
+      expect(schema.result.safeParse({ ready }).success).toBe(false)
+    }
   })
 })
 

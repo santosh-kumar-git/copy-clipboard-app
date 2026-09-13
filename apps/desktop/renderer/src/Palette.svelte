@@ -27,6 +27,7 @@
   let inputEl: HTMLInputElement | null = $state(null)
   let listEl: HTMLDivElement | null = $state(null)
   let tagEl: HTMLInputElement | null = $state(null)
+  let titleEl: HTMLInputElement | null = $state(null)
 
   const selected = $derived(palette.selectedItem)
   const activeId = $derived(selected === null ? null : `cairn-row-${selected.id}`)
@@ -55,17 +56,9 @@
   // Opening the tab field moves focus into it, and closing it hands focus back — otherwise the next
   // keystroke after a tab is filed goes nowhere at all.
   $effect(() => {
-    if (palette.tagging) tagEl?.focus()
+    if (palette.titleEditing) titleEl?.focus()
+    else if (palette.tagging) tagEl?.focus()
     else inputEl?.focus()
-  })
-
-  // Clicking away is a dismissal: an accessory panel that lingers after losing focus is a bug.
-  $effect(() => {
-    const onBlur = (): void => {
-      palette.pending = palette.close()
-    }
-    window.addEventListener('blur', onBlur)
-    return () => window.removeEventListener('blur', onBlur)
   })
 
   // Fixed row geometry, so the scroll position is a pure function of the window start. Never
@@ -75,6 +68,16 @@
     if (listEl !== null && listEl.scrollTop !== top) listEl.scrollTop = top
   })
 
+  $effect(() => {
+    if (listEl === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height ?? 0
+      if (height > 0) palette.setViewportHeight(height)
+    })
+    observer.observe(listEl)
+    return () => observer.disconnect()
+  })
+
   /** A click on a control in the palette must never take focus off the search field. */
   function keepFocus(event: MouseEvent): void {
     event.preventDefault()
@@ -82,6 +85,7 @@
 
   function onKeyDown(event: KeyboardEvent): void {
     const key = event.key
+    if (event.target instanceof HTMLButtonElement && (key === 'Enter' || key === ' ')) return
     if (key === 'Escape') {
       event.preventDefault()
       palette.pending = palette.close()
@@ -109,6 +113,11 @@
       palette.openTagging()
       return
     }
+    if ((event.metaKey || event.ctrlKey) && key.toLowerCase() === 'e') {
+      event.preventDefault()
+      palette.openTitleEditing()
+      return
+    }
     if ((event.metaKey || event.ctrlKey) && (key === 'Backspace' || key === 'Delete')) {
       event.preventDefault()
       palette.pending = palette.removeSelected()
@@ -129,26 +138,55 @@
       palette.closeTagging()
     }
   }
+
+  function onTitleKeyDown(event: KeyboardEvent): void {
+    event.stopPropagation()
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      palette.pending = palette.commitTitle()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      palette.closeTitleEditing()
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="palette" onkeydown={onKeyDown} role="none">
-  <input
-    bind:this={inputEl}
-    class="search"
-    data-testid="search"
-    type="text"
-    role="combobox"
-    aria-expanded="true"
-    aria-controls="cairn-results"
-    aria-activedescendant={activeId}
-    aria-label="Search your clipboard history"
-    placeholder="Search your clipboard history"
-    autocomplete="off"
-    spellcheck="false"
-    value={palette.query}
-    oninput={(event) => (palette.pending = palette.setQuery(event.currentTarget.value))}
-  />
+  <div class="palette-header">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="17" width="18" height="4" rx="2" />
+        <rect x="6" y="10" width="13" height="5" rx="2.5" />
+        <rect x="9" y="3" width="7" height="5" rx="2.5" />
+      </svg>
+      <span>Cairn</span>
+    </div>
+    <span class="history-count">{palette.total} {palette.total === 1 ? 'clip' : 'clips'}</span>
+  </div>
+  <div class="search-wrap">
+    <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="m16 16 4.5 4.5" />
+    </svg>
+    <input
+      bind:this={inputEl}
+      class="search"
+      data-testid="search"
+      type="text"
+      role="combobox"
+      aria-expanded="true"
+      aria-controls="cairn-results"
+      aria-activedescendant={activeId}
+      aria-label="Search your clipboard history"
+      placeholder="Find a clip or title…"
+      autocomplete="off"
+      spellcheck="false"
+      value={palette.query}
+      oninput={(event) => (palette.pending = palette.setQuery(event.currentTarget.value))}
+    />
+    <kbd class="search-key">⌘ ⇧ V</kbd>
+  </div>
 
   <div class="tabs" data-testid="tabs" role="group" aria-label="Tabs">
     {#each tabs as t (t.label)}
@@ -173,6 +211,29 @@
       onclick={() => palette.openTagging()}>+ Tab</button
     >
   </div>
+
+  {#if palette.titleEditing}
+    <div class="title-editor" data-testid="title-editor">
+      <label for="clip-title">Title <span>Hides the copied content from view</span></label>
+      <div class="title-editor-controls">
+        <input
+          id="clip-title"
+          bind:this={titleEl}
+          class="title-input"
+          data-testid="title-input"
+          aria-label="Clip title"
+          placeholder="e.g. Work login"
+          maxlength="120"
+          autocomplete="off"
+          value={palette.titleDraft}
+          oninput={(event) => (palette.titleDraft = event.currentTarget.value)}
+          onkeydown={onTitleKeyDown}
+        />
+        <button type="button" class="button-primary" onclick={() => (palette.pending = palette.commitTitle())}>Save</button>
+        <button type="button" class="button-quiet" onclick={() => palette.closeTitleEditing()}>Cancel</button>
+      </div>
+    </div>
+  {/if}
 
   {#if palette.tagging}
     <div class="tag-row" data-testid="tag-row">
@@ -236,18 +297,27 @@
               nowMs={palette.nowMs}
               selected={row.index === palette.selectedIndex}
               onpick={() => {
+                palette.hidePreview()
                 palette.selectedIndex = row.index
                 palette.pending = palette.recall()
               }}
               onpin={() => {
+                palette.hidePreview()
                 palette.selectedIndex = row.index
                 palette.pending = palette.togglePin()
               }}
               ontag={() => {
+                palette.hidePreview()
                 palette.selectedIndex = row.index
                 palette.openTagging()
               }}
+              ontitle={() => {
+                palette.hidePreview()
+                palette.selectedIndex = row.index
+                palette.openTitleEditing()
+              }}
               ondelete={() => {
+                palette.hidePreview()
                 palette.selectedIndex = row.index
                 palette.pending = palette.removeSelected()
               }}
@@ -261,7 +331,35 @@
   </div>
 
   <div class="preview-pane">
-    <Preview text={palette.previewText} mime={palette.previewMime} {filePaths} />
+    <div class="preview-heading">
+      <span>Preview</span>
+      {#if selected !== null}
+        <div class="preview-tools">
+          {#if selected.title != null && !palette.contentHidden}
+            <button type="button" class="button-quiet" onclick={() => palette.hidePreview()}>Hide content</button>
+          {/if}
+          <button type="button" class="button-quiet" onclick={() => palette.openTitleEditing()}>
+            {selected.title == null ? 'Add title' : 'Edit title'}
+          </button>
+        </div>
+      {/if}
+    </div>
+    {#if palette.contentHidden}
+      <div class="hidden-content" data-testid="hidden-content">
+        <div>
+          <span class="hidden-content-title">Content hidden</span>
+          <p>Copy this clip without showing it on screen.</p>
+        </div>
+        <button
+          type="button"
+          class="button-quiet reveal-button"
+          data-testid="reveal-content"
+          onclick={() => (palette.pending = palette.revealPreview())}>Reveal</button
+        >
+      </div>
+    {:else}
+      <Preview text={palette.previewText} mime={palette.previewMime} {filePaths} />
+    {/if}
   </div>
 
   <!-- Real buttons, not a legend. Pin, tab and delete are all still keyboard shortcuts, and each

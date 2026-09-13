@@ -1,5 +1,5 @@
 import * as z from 'zod'
-import { TABS_MAX, TAG_MAX_CHARS, TAGS_MAX_PER_ITEM } from './constants'
+import { TABS_MAX, TAG_MAX_CHARS, TAGS_MAX_PER_ITEM, TITLE_MAX_CHARS, normalizeTitle } from './constants'
 
 export const IPC_REQUEST_CHANNELS = [
   'cairn:history.list',
@@ -7,9 +7,11 @@ export const IPC_REQUEST_CHANNELS = [
   'cairn:history.preview',
   'cairn:history.pin',
   'cairn:history.tag',
+  'cairn:history.title',
   'cairn:history.remove',
   'cairn:recall.copy',
   'cairn:palette.close',
+  'cairn:palette.ready',
   'cairn:security.status',
 ] as const
 export type IpcRequestChannel = (typeof IPC_REQUEST_CHANNELS)[number]
@@ -28,12 +30,14 @@ export const ItemIdSchema = z.string().length(26).regex(/^[0-9A-HJKMNP-TV-Z]{26}
  *  normaliser was skipped rather than that the user typed something odd. */
 export const TagSchema = z.string().min(1).max(TAG_MAX_CHARS)
 export const TabSchema = z.object({ tag: TagSchema, count: z.int().min(0) })
+export const TitleSchema = z.string().max(TITLE_MAX_CHARS).nullable().transform(normalizeTitle)
 
 /** What crosses to the renderer. Note there is no `repRefs` and no raw bytes: the renderer can
  *  never ask for a body, only for the masked preview and the thumbnail. */
 export const ItemSummarySchema = z.object({
   id: ItemIdSchema,
   kind: z.enum(['text', 'richtext', 'image', 'files']),
+  title: TitleSchema.default(null),
   preview: z.string().max(512),
   previewTruncated: z.boolean(),
   flags: z.array(z.enum(['secret', 'concealed', 'transient', 'auto-generated', 'excluded', 'no-sync', 'cut'])),
@@ -98,6 +102,10 @@ export const IpcRequestSchema = {
     params: z.object({ id: ItemIdSchema, tag: z.string().max(TAG_MAX_CHARS), tagged: z.boolean() }),
     result: z.object({ tags: z.array(TagSchema).max(TAGS_MAX_PER_ITEM) }),
   },
+  'cairn:history.title': {
+    params: z.object({ id: ItemIdSchema, title: TitleSchema }),
+    result: z.object({ title: TitleSchema }),
+  },
   'cairn:history.remove': {
     params: z.object({ id: ItemIdSchema }),
     result: z.object({ removed: z.boolean() }),
@@ -111,6 +119,10 @@ export const IpcRequestSchema = {
     }),
   },
   'cairn:palette.close': { params: z.object({}), result: z.object({ closed: z.literal(true) }) },
+  'cairn:palette.ready': {
+    params: z.object({ shownAt: z.int() }),
+    result: z.object({ ready: z.boolean() }),
+  },
   'cairn:security.status': {
     params: z.object({}),
     result: z.object({

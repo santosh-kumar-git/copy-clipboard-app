@@ -53,3 +53,36 @@ it('renders a hostile HTML clipboard item as text in the row and in the preview'
   expect(fake.listCalls.length).toBe(1)
   expect(fake.copyCalls).toEqual([])
 })
+
+it('keeps titled clipboard content out of text, attributes and thumbnails until explicitly revealed', async () => {
+  const hidden = 'synthetic-private-value'
+  const item = makeItem(1, {
+    title: 'Work login',
+    preview: hidden,
+    thumbnailDataUrl: 'data:image/jpeg;base64,/9j/4AAQ',
+  })
+  const fake = createFakeApi({
+    items: [item],
+    previews: new Map([[item.id, { text: hidden, isHtmlSource: false, truncated: false }]]),
+  })
+  const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+  await state.start()
+  app = mount(Palette, { target: host, props: { palette: state } }) as Record<string, unknown>
+  flushSync()
+
+  expect(host.textContent).toContain('Work login')
+  expect(host.innerHTML).not.toContain(hidden)
+  expect(host.querySelector('img')).toBe(null)
+  expect(fake.previewCalls).toEqual([])
+
+  host.querySelector<HTMLButtonElement>('[data-testid="reveal-content"]')!.click()
+  await state.pending
+  flushSync()
+  expect(host.querySelector('[data-testid="preview"]')?.textContent).toBe(hidden)
+
+  fake.emitPaletteShown({ shownAt: 123 })
+  await state.pending
+  flushSync()
+  expect(host.innerHTML).not.toContain(hidden)
+  state.dispose()
+})

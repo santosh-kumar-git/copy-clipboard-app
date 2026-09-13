@@ -106,7 +106,7 @@ describe('composeApp binds nothing (contract §8)', () => {
       },
       keyring: { getMode: () => 'os-keyring' as const, probeBackend: () => ({ notes: [] }), lock: noop },
       store: { close: noop },
-      palette: { show: noop, hide: noop, isVisible: () => false, send: noop, destroy: noop },
+      palette: { show: noop, ready: () => false, hide: noop, isVisible: () => false, send: noop, destroy: noop },
       ipcMain: { handle: noop, removeHandler: noop },
       powerMonitor: { on: noop, getSystemIdleTime: () => 0 },
       clock: createTestClock(),

@@ -97,6 +97,7 @@ export interface CreateTrayDeps {
   readonly accelerator: string
   readonly historyLimit: () => number
   readonly onToggle: () => void
+  readonly onOpen: () => void
   readonly onSetHistoryLimit: (limit: number) => void
   readonly onQuit: () => void
   readonly logger: Logger
@@ -125,7 +126,7 @@ export function createTray(deps: CreateTrayDeps): TrayLike | null {
         trayMenuTemplate({
           accelerator: deps.accelerator,
           historyLimit: deps.historyLimit(),
-          onOpen: deps.onToggle,
+          onOpen: deps.onOpen,
           onSetHistoryLimit: deps.onSetHistoryLimit,
           onQuit: deps.onQuit,
         }),

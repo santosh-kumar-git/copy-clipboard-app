@@ -3,10 +3,12 @@ import {
   PREVIEW_MAX_CHARS,
   TABS_MAX,
   TAGS_MAX_PER_ITEM,
+  TITLE_MAX_CHARS,
   contentHash,
   err,
   newItemId,
   normalizeTag,
+  normalizeTitle,
   ok,
   type BlobId,
   type Candidate,
@@ -86,6 +88,7 @@ export interface History {
    * shrinks again when the last one stops.
    */
   tag(id: ItemId, tag: string, tagged: boolean): Promise<Result<{ tags: readonly string[] }>>
+  setTitle(id: ItemId, title: string | null): Promise<Result<{ title: string | null }>>
   /** Every tab that currently has at least one live item, alphabetical, capped at TABS_MAX. */
   tabs(): readonly Tab[]
   /** How many live items are pinned — the Pinned tab's count. */
@@ -177,6 +180,12 @@ export function createHistory(deps: HistoryDeps): History {
   const listeners = new Set<(e: { reason: ChangeReason; total: number }) => void>()
   /** False after evictPreviewCache() until the next load(). Guards `search()` (spec §11 control 6). */
   let previewsLoaded = true
+  let evictionEpoch = 0
+  let loading: Promise<Result<{ items: number }>> | null = null
+  const scrubPreview = (it: Item): Item => ({ ...it, title: null, preview: '', maskSpans: [] })
+  const remember = (it: Item): void => {
+    items.set(it.id, previewsLoaded ? it : scrubPreview(it))
+  }
 
   const emit = (reason: ChangeReason): void => {
     for (const cb of listeners) cb({ reason, total: items.size })
@@ -184,9 +193,10 @@ export function createHistory(deps: HistoryDeps): History {
   const recency = (a: Item, b: Item): number =>
     b.updatedAt - a.updatedAt || (ord.get(b.id) ?? 0) - (ord.get(a.id) ?? 0)
   const reindex = (it: Item): void => {
+    if (!previewsLoaded) return
     search.add({
       id: it.id,
-      preview: it.preview,
+      preview: it.title ?? it.preview,
       pinned: it.pinned,
       tagged: (it.tags?.length ?? 0) > 0,
       updatedAt: it.updatedAt,
@@ -201,41 +211,76 @@ export function createHistory(deps: HistoryDeps): History {
     if (it !== undefined && byHash.get(it.contentHash) === id) byHash.delete(it.contentHash)
   }
   const isLive = (it: Item, nowMs: number): boolean => it.expiresAt === null || nowMs < it.expiresAt
-  /** Records written before tabs existed have no `tags` key, so every read normalises it. */
-  const withTags = (it: Item): Item => (Array.isArray(it.tags) ? it : { ...it, tags: [] })
+  // Old records predate tags and titles.
+  const withDefaults = (it: Item): Item => ({
+    ...it, tags: Array.isArray(it.tags) ? it.tags : [], title: it.title ?? null,
+  })
+  const blobIds = (it: Item): Set<BlobId> => new Set([
+    ...it.repRefs.map((ref) => ref.blobId),
+    ...(it.thumbnailBlobId === null ? [] : [it.thumbnailBlobId]),
+  ])
+  const deleteUnreferencedBlobs = (removed: Item): Result<void> => {
+    const unreferenced = blobIds(removed)
+    for (const it of items.values()) {
+      if (it.id === removed.id) continue
+      for (const id of blobIds(it)) unreferenced.delete(id)
+    }
+    for (const id of unreferenced) {
+      const deleted = store.deleteBlob(id)
+      if (!deleted.ok) return deleted
+    }
+    return ok(undefined)
+  }
+
+  const replay = async (): Promise<Result<{ items: number }>> => {
+    const startedAtEpoch = evictionEpoch
+    const restored = new Map<ItemId, Item>()
+    const restoredOrd = new Map<ItemId, number>()
+    for await (const rec of store.readAll()) {
+      if (!rec.ok) return rec
+      const ev = rec.value
+      if (ev.kind === 'ITEM_ADDED') {
+        restored.set(ev.item.id, withDefaults(ev.item))
+        restoredOrd.set(ev.item.id, ev.seq)
+      } else if (ev.kind === 'ITEM_UPDATED') {
+        const cur = restored.get(ev.id)
+        if (cur !== undefined) restored.set(ev.id, withDefaults({ ...cur, ...ev.patch }))
+      } else if (ev.kind === 'ITEM_DELETED') {
+        restored.delete(ev.id)
+        restoredOrd.delete(ev.id)
+      }
+    }
+    // Publish one complete snapshot; an eviction during replay must remain effective.
+    previewsLoaded = evictionEpoch === startedAtEpoch
+    items.clear()
+    ord.clear()
+    byHash.clear()
+    search.clear()
+    for (const it of restored.values()) remember(it)
+    for (const [id, seq] of restoredOrd) ord.set(id, seq)
+    for (const [hash, id] of indexByContentHash(items.values())) byHash.set(hash, id)
+    for (const it of items.values()) reindex(it)
+    return ok({ items: items.size })
+  }
 
   return {
-    async load() {
-      items.clear()
-      ord.clear()
-      byHash.clear()
-      search.clear()
-      for await (const rec of store.readAll()) {
-        if (!rec.ok) return rec
-        const ev = rec.value
-        if (ev.kind === 'ITEM_ADDED') {
-          items.set(ev.item.id, withTags(ev.item))
-          ord.set(ev.item.id, ev.seq)
-        } else if (ev.kind === 'ITEM_UPDATED') {
-          const cur = items.get(ev.id)
-          if (cur !== undefined) items.set(ev.id, withTags({ ...cur, ...ev.patch }))
-        } else if (ev.kind === 'ITEM_DELETED') {
-          items.delete(ev.id)
-          ord.delete(ev.id)
-        }
-        // CHECKPOINT carries no item state in M1; the store owns maxSeq and the watermark vector.
-      }
-      for (const [hash, id] of indexByContentHash(items.values())) byHash.set(hash, id)
-      previewsLoaded = true
-      for (const it of items.values()) reindex(it)
-      return ok({ items: items.size })
+    load() {
+      if (loading === null) loading = replay().finally(() => { loading = null })
+      return loading
     },
 
     async ingest(candidate) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
       const totalBytes = candidate.reps.reduce((n, r) => n + r.byteLength, 0)
+      const primary = primaryRep(candidate.reps)
+      // Capture's preview is already masked; only the original primary bytes retain detector input.
+      const rawText = primary?.mime.startsWith('text/') ? Buffer.from(primary.bytes).toString('utf8') : null
       const snapshot: Snapshot = {
         reps: candidate.reps,
-        primaryText: candidate.primaryText,
+        primaryText: rawText,
         kind: candidate.kind,
         hints: candidate.hints,
         sourceApp: candidate.sourceApp,
@@ -253,23 +298,23 @@ export function createHistory(deps: HistoryDeps): History {
       const existing = existingId === undefined ? undefined : items.get(existingId)
       if (existingId !== undefined && existing !== undefined) {
         const bumped = bumpUpdatedAt(existing, now)
-        const appended = await store.appendEvent({
+        const appended = store.appendEvent({
           kind: 'ITEM_UPDATED',
           id: existingId,
           patch: bumped.patch,
         })
         if (!appended.ok) return appended
-        items.set(existingId, bumped.item)
+        remember(bumped.item)
         reindex(bumped.item)
         logger.info('history.duplicate', { itemId: existingId, kind: existing.kind })
         emit('update')
         return ok({ outcome: 'duplicate', item: bumped.item })
       }
-      const masked = privacy.mask(candidate.primaryText ?? '')
+      const masked = privacy.mask(rawText ?? '')
       const { preview, previewTruncated } = truncatePreview(masked.preview)
       const repRefs: RepRef[] = []
       for (const rep of candidate.reps) {
-        const put = await store.putBlob(rep.bytes)
+        const put = store.putBlob(rep.bytes)
         if (!put.ok) return put
         repRefs.push({
           mime: rep.mime,
@@ -281,13 +326,14 @@ export function createHistory(deps: HistoryDeps): History {
       }
       let thumbnailBlobId: BlobId | null = null
       if (candidate.thumbnailJpeg !== null) {
-        const put = await store.putBlob(candidate.thumbnailJpeg)
+        const put = store.putBlob(candidate.thumbnailJpeg)
         if (!put.ok) return put
         thumbnailBlobId = put.value
       }
       const item: Item = {
         id: newItemId(now, randomBytes(10)),
         kind: candidate.kind,
+        title: null,
         contentHash: candidate.contentHash,
         preview,
         previewTruncated,
@@ -306,9 +352,9 @@ export function createHistory(deps: HistoryDeps): History {
         expiresAt: secretExpiresAt(now, verdict.flags),
       }
       // No `at:` — the store stamps it from its own clock, and passing it is a TS2353 error.
-      const appended = await store.appendEvent({ kind: 'ITEM_ADDED', item })
+      const appended = store.appendEvent({ kind: 'ITEM_ADDED', item })
       if (!appended.ok) return appended
-      items.set(item.id, item)
+      remember(item)
       ord.set(item.id, appended.value.seq)
       byHash.set(item.contentHash, item.id)
       reindex(item)
@@ -354,12 +400,16 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     async resolveReps(id) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
       const it = items.get(id)
       if (it === undefined) return err('E_ITEM_NOT_FOUND', `no item ${id}`)
       if (!isLive(it, clock.now())) return err('E_ITEM_EXPIRED', `item ${id} has expired`)
       const reps: ResolvedRep[] = []
       for (const ref of it.repRefs) {
-        const got = await store.getBlob(ref.blobId)
+        const got = store.getBlob(ref.blobId)
         if (!got.ok) return got
         // Verify before handing bytes to anyone: cheap, and it turns a silent corruption into a code.
         if (contentHash(got.value) !== ref.sha256) {
@@ -377,6 +427,10 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     async pin(id, pinned) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
       const it = items.get(id)
       if (it === undefined) return err('E_ITEM_NOT_FOUND', `no item ${id}`)
       // Refuse loudly. A silently ignored pin is how a user believes a secret is being kept.
@@ -389,10 +443,10 @@ export function createHistory(deps: HistoryDeps): History {
       // which is the same lie as sorting pinned rows first — a copy from last week would appear to
       // have just happened. Pinning changes how long an item lives, not when it was copied.
       const patch = { updatedAt: it.updatedAt, pinned }
-      const appended = await store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
+      const appended = store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
       if (!appended.ok) return appended
       const next = { ...it, ...patch }
-      items.set(id, next)
+      remember(next)
       reindex(next)
       logger.info('history.pinned', { itemId: id, ok: pinned })
       emit('update')
@@ -400,6 +454,10 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     async tag(id, rawTag, tagged) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
       const it = items.get(id)
       if (it === undefined) return err('E_ITEM_NOT_FOUND', `no item ${id}`)
       const applied = applyTag(it.tags, rawTag, tagged)
@@ -411,16 +469,38 @@ export function createHistory(deps: HistoryDeps): History {
       // `updatedAt` is deliberately NOT bumped: filing something into a tab is not re-copying it,
       // and moving it to the top of the timeline is exactly the confusion the un-floated pin fixed.
       const patch = { updatedAt: it.updatedAt, tags: applied.tags }
-      const appended = await store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
+      const appended = store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
       if (!appended.ok) return appended
       const next = { ...it, ...patch }
-      items.set(id, next)
+      remember(next)
       reindex(next)
       // The COUNT only. A tab name is user-authored text typed into a field one keystroke away from a
       // clipboard search box, so it is never logged.
       logger.info('history.tagged', { itemId: id, count: applied.tags.length })
       emit('update')
       return ok({ tags: applied.tags })
+    },
+
+    async setTitle(id, rawTitle) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
+      const it = items.get(id)
+      if (it === undefined) return err('E_ITEM_NOT_FOUND', `no item ${id}`)
+      if (rawTitle !== null && rawTitle.length > TITLE_MAX_CHARS) {
+        return err('E_BAD_PARAMS', `a title cannot exceed ${TITLE_MAX_CHARS} characters`)
+      }
+      const title = normalizeTitle(rawTitle)
+      if (previewsLoaded && title === (it.title ?? null)) return ok({ title })
+      const patch = { updatedAt: it.updatedAt, title }
+      const appended = store.appendEvent({ kind: 'ITEM_UPDATED', id, patch })
+      if (!appended.ok) return appended
+      const next = { ...it, ...patch }
+      remember(next)
+      reindex(next)
+      emit('update')
+      return ok({ title })
     },
 
     tabs() {
@@ -444,18 +524,16 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     async remove(id) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
       const it = items.get(id)
       if (it === undefined) return ok({ removed: false })
-      const appended = await store.appendEvent({ kind: 'ITEM_DELETED', id, reason: 'user' })
+      const appended = store.appendEvent({ kind: 'ITEM_DELETED', id, reason: 'user' })
       if (!appended.ok) return appended
-      for (const ref of it.repRefs) {
-        const del = await store.deleteBlob(ref.blobId)
-        if (!del.ok) return del
-      }
-      if (it.thumbnailBlobId !== null) {
-        const del = await store.deleteBlob(it.thumbnailBlobId)
-        if (!del.ok) return del
-      }
+      const deleted = deleteUnreferencedBlobs(it)
+      if (!deleted.ok) return deleted
       forget(id)
       logger.info('history.removed', { itemId: id })
       emit('delete')
@@ -463,26 +541,24 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     async evictNow() {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
       const plan: readonly Eviction[] = planEviction([...items.values()], clock.now(), limits)
       for (const ev of plan) {
         const it = items.get(ev.id)
         if (it === undefined) continue
         // The local log always records the delete — the hash chain requires it — but the reason is
         // never 'user', so `isSyncableDelete` keeps it off any future wire (spec §4).
-        const appended = await store.appendEvent({
+        const appended = store.appendEvent({
           kind: 'ITEM_DELETED',
           id: ev.id,
           reason: ev.reason,
         })
         if (!appended.ok) return appended
-        for (const ref of it.repRefs) {
-          const del = await store.deleteBlob(ref.blobId)
-          if (!del.ok) return del
-        }
-        if (it.thumbnailBlobId !== null) {
-          const del = await store.deleteBlob(it.thumbnailBlobId)
-          if (!del.ok) return del
-        }
+        const deleted = deleteUnreferencedBlobs(it)
+        if (!deleted.ok) return deleted
         forget(ev.id)
       }
       if (plan.length > 0) {
@@ -495,9 +571,10 @@ export function createHistory(deps: HistoryDeps): History {
     evictPreviewCache() {
       search.clear()
       previewsLoaded = false
+      evictionEpoch += 1
       // JavaScript cannot zero a string, so the honest control is to drop every reference and stop
       // answering searches until load() re-reads the encrypted store.
-      for (const [id, it] of items) items.set(id, { ...it, preview: '', maskSpans: [] })
+      for (const it of items.values()) remember(it)
     },
 
     setMaxItems(maxItems) {

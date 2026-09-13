@@ -121,7 +121,10 @@ export function createCapture(deps: CaptureDeps): Capture {
     const ev = pending
     pending = null
     if (ev === null) return
-    inFlight = inFlight.then(() => emit(ev))
+    inFlight = inFlight.then(() => emit(ev)).catch(() => {
+      // Handle this capture's failure before it can poison subsequent flushes or idle waits.
+      logger.warn('capture.candidate', { code: 'E_INTERNAL', ok: false })
+    })
   }
 
   const onChanged = (ev: ClipboardChangedPayload): void => {
