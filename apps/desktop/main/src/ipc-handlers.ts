@@ -10,6 +10,7 @@ import {
   type IpcRequestChannel,
   type Item,
   type ItemId,
+  type ItemPreview,
   type ItemSummary,
   type KeyringMode,
   type Logger,
@@ -27,7 +28,7 @@ export interface RecallPort {
   copy(id: ItemId): Promise<Result<{ result: 'copied-manual'; reason: 'user-preference' }>>
 }
 export interface PreviewPort {
-  preview(id: ItemId): Promise<Result<{ text: string; isHtmlSource: boolean; truncated: boolean }>>
+  preview(id: ItemId): Promise<Result<ItemPreview>>
 }
 export interface SecurityStatusPort {
   status(): {

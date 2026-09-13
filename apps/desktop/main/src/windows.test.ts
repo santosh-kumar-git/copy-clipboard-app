@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 import { createTestClock, type Logger } from '@cairn/protocol'
-import { PALETTE_HEIGHT, PALETTE_WIDTH } from './constants'
+import { PALETTE_HEIGHT, PALETTE_MIN_HEIGHT, PALETTE_MIN_WIDTH, PALETTE_WIDTH } from './constants'
 import {
   applyCspHeader,
   createPaletteWindow,
@@ -26,6 +26,8 @@ interface Recorded {
   readonly alwaysOnTop: unknown[][]
   readonly visibleOnAllWorkspaces: unknown[][]
   readonly bounds: { x: number; y: number; width: number; height: number }[]
+  currentBounds: { x: number; y: number; width: number; height: number }
+  readonly minimumSizes: [number, number][]
   readonly loadedFiles: string[]
   readonly loadedUrls: string[]
   readonly sent: [string, unknown][]
@@ -44,6 +46,8 @@ function fakeBrowserWindow(): { Ctor: new (o: PaletteWindowOptions) => BrowserWi
     alwaysOnTop: [],
     visibleOnAllWorkspaces: [],
     bounds: [],
+    currentBounds: { x: 0, y: 0, width: 720, height: 648 },
+    minimumSizes: [],
     loadedFiles: [],
     loadedUrls: [],
     sent: [],
@@ -73,7 +77,10 @@ function fakeBrowserWindow(): { Ctor: new (o: PaletteWindowOptions) => BrowserWi
     setVisibleOnAllWorkspaces(...args: unknown[]): void { rec.visibleOnAllWorkspaces.push(args) }
     setBounds(bounds: { x: number; y: number; width: number; height: number }): void {
       rec.bounds.push(bounds)
+      rec.currentBounds = { ...bounds }
     }
+    getBounds(): typeof rec.currentBounds { return { ...rec.currentBounds } }
+    setMinimumSize(width: number, height: number): void { rec.minimumSizes.push([width, height]) }
     on(event: 'blur', cb: () => void): void { if (event === 'blur') rec.blur = cb }
     loadFile(p: string): Promise<void> { rec.loadedFiles.push(p); return Promise.resolve() }
     loadURL(u: string): Promise<void> { rec.loadedUrls.push(u); return Promise.resolve() }
@@ -110,7 +117,9 @@ describe('paletteWindowOptions', () => {
   it('is an NSPanel-shaped, chromeless, invisible-on-launch window', () => {
     expect(o.type).toBe('panel')
     expect(o.frame).toBe(false)
-    expect(o.transparent).toBe(true)
+    expect(o.transparent).toBe(false)
+    expect(o.backgroundColor).toBe('#22272a')
+    expect(o.roundedCorners).toBe(true)
     expect(o.show).toBe(false)
     expect(o.skipTaskbar).toBe(true)
     expect(o.width).toBe(PALETTE_WIDTH)
@@ -122,9 +131,9 @@ describe('paletteWindowOptions', () => {
     expect(o.visualEffectState).toBe('active')
   })
 
-  it('cannot be resized, moved, minimised, maximised or fullscreened', () => {
-    expect(o.resizable).toBe(false)
-    expect(o.movable).toBe(false)
+  it('allows dragging and resizing while keeping minimise, maximise and fullscreen disabled', () => {
+    expect(o.resizable).toBe(true)
+    expect(o.movable).toBe(true)
     expect(o.minimizable).toBe(false)
     expect(o.maximizable).toBe(false)
     expect(o.fullscreenable).toBe(false)
@@ -358,6 +367,97 @@ describe('createPaletteWindow', () => {
     expect(rec.bounds).toEqual([{ x: 1456, y: 40, width: 608, height: 448 }])
   })
 
+  it('preserves manually moved and resized bounds across reopen without bypassing readiness', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    openPalette(palette)
+    rec.currentBounds = { x: 92, y: 75, width: 920, height: 710 }
+    palette.hide()
+    palette.show()
+
+    expect(rec.bounds.at(-1)).toEqual({ x: 92, y: 75, width: 920, height: 710 })
+    expect(rec.minimumSizes.at(-1)).toEqual([PALETTE_MIN_WIDTH, PALETTE_MIN_HEIGHT])
+    expect(rec.shown).toBe(1)
+    palette.send('cairn:palette.shown', { shownAt: 2 })
+    expect(palette.ready(1)).toBe(false)
+    expect(palette.ready(2)).toBe(true)
+    expect(rec.shown).toBe(2)
+  })
+
+  it('retains the resized dimensions when moving to another display', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    let pointer = { x: 300, y: 200 }
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor,
+      screen: {
+        getCursorScreenPoint: () => pointer,
+        getDisplayNearestPoint: (point) => ({
+          workArea: point.x < 0
+            ? { x: -1920, y: -200, width: 1920, height: 1080 }
+            : { x: 0, y: 30, width: 1440, height: 870 },
+        }),
+      },
+      mode: 'packaged', preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    openPalette(palette)
+    rec.currentBounds = { x: 92, y: 75, width: 920, height: 710 }
+    palette.hide()
+    pointer = { x: -1500, y: 100 }
+    openPalette(palette, 2)
+
+    expect(rec.bounds.at(-1)).toEqual({ x: -1420, y: -15, width: 920, height: 710 })
+  })
+
+  it('clamps a manually positioned window when its current work area shrinks', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    let workArea = { x: 0, y: 30, width: 1440, height: 870 }
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor,
+      screen: { ...screen, getDisplayNearestPoint: () => ({ workArea }) },
+      mode: 'packaged', preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    openPalette(palette)
+    rec.currentBounds = { x: 400, y: 300, width: 900, height: 560 }
+    palette.hide()
+    workArea = { x: 0, y: 30, width: 1000, height: 700 }
+    openPalette(palette, 2)
+
+    expect(rec.bounds.at(-1)).toEqual({ x: 84, y: 154, width: 900, height: 560 })
+    palette.hide()
+    workArea = { x: 0, y: 30, width: 640, height: 480 }
+    openPalette(palette, 3)
+    expect(rec.bounds.at(-1)).toEqual({ x: 16, y: 46, width: 608, height: 448 })
+  })
+
+  it.each([
+    { width: 400, height: 300, expected: { x: -384, y: 46, width: 368, height: 268 }, minimum: [368, 268] },
+    { width: 20, height: 10, expected: { x: -10, y: 35, width: 1, height: 1 }, minimum: [1, 1] },
+  ])('keeps bounds and minimum size inside a $width by $height work area', ({ width, height, expected, minimum }) => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor,
+      screen: {
+        ...screen,
+        getDisplayNearestPoint: () => ({ workArea: { x: -width, y: 30, width, height } }),
+      },
+      mode: 'packaged', preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    openPalette(palette)
+
+    expect(rec.bounds.at(-1)).toEqual(expected)
+    expect(rec.minimumSizes.at(-1)).toEqual(minimum)
+    palette.hide()
+    openPalette(palette, 2)
+    expect(rec.bounds.at(-1)).toEqual(expected)
+  })
+
   it('dismisses native focus loss once and ignores old blur after refocusing', () => {
     const { Ctor, rec } = fakeBrowserWindow()
     const palette = createPaletteWindow({
@@ -377,6 +477,63 @@ describe('createPaletteWindow', () => {
     palette.hide()
     palette.hide()
     expect(rec.hidden).toBe(2)
+  })
+
+  it.each(['before announcement', 'after announcement'])(
+    'ignores delayed hide blur while preparing a resized reopen (%s)',
+    (timing) => {
+      const { Ctor, rec } = fakeBrowserWindow()
+      const clock = createTestClock()
+      const palette = createPaletteWindow({
+        BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+        preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+        env: {}, clock, logger: silentLogger(),
+      })
+      openPalette(palette)
+      rec.currentBounds = { x: 150, y: 100, width: 800, height: 720 }
+      clock.setTimeout(() => rec.blur(), 1)
+      palette.show()
+      if (timing === 'after announcement') palette.send('cairn:palette.shown', { shownAt: 2 })
+      clock.advance(1)
+
+      expect(palette.isVisible()).toBe(true)
+      expect(rec.shown).toBe(1)
+      expect(rec.hidden).toBe(1)
+      expect(rec.bounds.at(-1)).toEqual({ x: 150, y: 100, width: 800, height: 720 })
+      if (timing === 'before announcement') palette.send('cairn:palette.shown', { shownAt: 2 })
+      expect(palette.ready(1)).toBe(false)
+      expect(palette.ready(2)).toBe(true)
+      expect(rec.shown).toBe(2)
+
+      rec.blur()
+      expect(palette.isVisible()).toBe(true)
+      rec.focused = false
+      rec.blur()
+      expect(palette.isVisible()).toBe(false)
+      expect(rec.hidden).toBe(2)
+    },
+  )
+
+  it('honours explicit hide during preparation even after a delayed blur', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const clock = createTestClock()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock, logger: silentLogger(),
+    })
+    openPalette(palette)
+    palette.show()
+    palette.send('cairn:palette.shown', { shownAt: 2 })
+    clock.setTimeout(() => rec.blur(), 1)
+    clock.advance(1)
+    expect(palette.isVisible()).toBe(true)
+
+    palette.hide()
+    expect(palette.isVisible()).toBe(false)
+    expect(palette.ready(2)).toBe(false)
+    expect(rec.shown).toBe(1)
+    expect(rec.hidden).toBe(1)
   })
 
   it('waits for the matching renderer reset before making a prepared window visible', () => {

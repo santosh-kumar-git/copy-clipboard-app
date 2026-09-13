@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { newItemId } from './id'
+import { fixturePath } from './testing'
 import {
   IPC_EVENT_CHANNELS,
   IPC_REQUEST_CHANNELS,
@@ -158,6 +160,50 @@ describe('palette ready contract', () => {
     for (const ready of [undefined, null, 'true', 1]) {
       expect(schema.result.safeParse({ ready }).success).toBe(false)
     }
+  })
+})
+
+describe('explicit image preview contract', () => {
+  const png = readFileSync(fixturePath('formats', 'screenshot.png'))
+  const result = IpcRequestSchema['cairn:history.preview'].result
+  const preview = { text: '', isHtmlSource: false, truncated: false }
+
+  it('preserves an optional PNG image and accepts existing text-only results', () => {
+    const imageDataUrl = `data:image/png;base64,${png.toString('base64')}`
+    expect(result.parse({ ...preview, imageDataUrl })).toEqual({ ...preview, imageDataUrl })
+    expect(result.parse(preview)).toEqual(preview)
+  })
+
+  it('rejects external URLs, SVG, malformed base64 and image bytes with a mismatched MIME', () => {
+    for (const imageDataUrl of [
+      'https://example.invalid/image.png',
+      'file:///tmp/image.png',
+      'data:image/svg+xml;base64,PHN2Zy8+',
+      'data:image/png;charset=utf-8;base64,aGVsbG8=',
+      'data:image/png;base64,%%%invalid%%%',
+      'data:image/png;base64,PHN2Zy8+',
+      `data:image/jpeg;base64,${png.toString('base64')}`,
+      `data:image/png;base64,${png.toString('base64')}\n`,
+      `data:image/png;base64,${png.toString('base64')}#fragment`,
+    ]) {
+      expect(result.safeParse({ ...preview, imageDataUrl }).success).toBe(false)
+    }
+  })
+
+  it('enforces the decoded 8 MiB boundary even when base64 lengths round to the same size', () => {
+    const bytes = Buffer.alloc(8 * 1024 * 1024 + 1)
+    png.copy(bytes)
+    const imageDataUrl = `data:image/png;base64,${bytes.toString('base64')}`
+    expect(result.safeParse({ ...preview, imageDataUrl }).success).toBe(false)
+    const bounded = `data:image/png;base64,${bytes.subarray(0, -1).toString('base64')}`
+    expect(result.parse({ ...preview, imageDataUrl: bounded }).imageDataUrl?.length).toBe(bounded.length)
+  })
+
+  it('never adds image data to an item summary', () => {
+    const parsed = ItemSummarySchema.parse({
+      ...summary, imageDataUrl: `data:image/png;base64,${png.toString('base64')}`,
+    })
+    expect(parsed).not.toHaveProperty('imageDataUrl')
   })
 })
 

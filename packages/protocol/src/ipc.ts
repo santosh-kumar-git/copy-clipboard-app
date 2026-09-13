@@ -1,5 +1,5 @@
 import * as z from 'zod'
-import { TABS_MAX, TAG_MAX_CHARS, TAGS_MAX_PER_ITEM, TITLE_MAX_CHARS, normalizeTitle } from './constants'
+import { PREVIEW_IMAGE_MAX_BYTES, TABS_MAX, TAG_MAX_CHARS, TAGS_MAX_PER_ITEM, TITLE_MAX_CHARS, normalizeTitle } from './constants'
 
 export const IPC_REQUEST_CHANNELS = [
   'cairn:history.list',
@@ -31,6 +31,25 @@ export const ItemIdSchema = z.string().length(26).regex(/^[0-9A-HJKMNP-TV-Z]{26}
 export const TagSchema = z.string().min(1).max(TAG_MAX_CHARS)
 export const TabSchema = z.object({ tag: TagSchema, count: z.int().min(0) })
 export const TitleSchema = z.string().max(TITLE_MAX_CHARS).nullable().transform(normalizeTitle)
+
+function isPreviewImageDataUrl(value: string): boolean {
+  if (value.length > 'data:image/jpeg;base64,'.length + Math.ceil(PREVIEW_IMAGE_MAX_BYTES / 3) * 4) return false
+  const prefix = /^data:image\/(png|jpeg);base64,/.exec(value)
+  if (prefix === null) return false
+  const encoded = value.slice(prefix[0].length)
+  if (encoded.length === 0 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return false
+  const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0
+  if (encoded.length / 4 * 3 - padding > PREVIEW_IMAGE_MAX_BYTES) return false
+  const tail = encoded.slice(-4)
+  if (btoa(atob(tail)) !== tail) return false
+  const head = atob(encoded.slice(0, 12))
+  return prefix[1] === 'png' ? head.startsWith('\x89PNG\r\n\x1a\n') : head.startsWith('\xff\xd8\xff')
+}
+
+export const PreviewImageDataUrlSchema = z.string().refine(
+  isPreviewImageDataUrl,
+  'expected a PNG or JPEG base64 data URL within the preview image limit',
+)
 
 /** What crosses to the renderer. Note there is no `repRefs` and no raw bytes: the renderer can
  *  never ask for a body, only for the masked preview and the thumbnail. */
@@ -91,7 +110,12 @@ export const IpcRequestSchema = {
     params: z.object({ id: ItemIdSchema }),
     // `text` is ALWAYS plain text. When the item is HTML, this is the HTML *source*, and the
     // renderer prints it as text. `isHtmlSource` exists only to label the pane.
-    result: z.object({ text: z.string().max(8192), isHtmlSource: z.boolean(), truncated: z.boolean() }),
+    result: z.object({
+      text: z.string().max(8192),
+      isHtmlSource: z.boolean(),
+      truncated: z.boolean(),
+      imageDataUrl: PreviewImageDataUrlSchema.optional(),
+    }),
   },
   'cairn:history.pin': {
     params: z.object({ id: ItemIdSchema, pinned: z.boolean() }),
@@ -154,3 +178,4 @@ export type IpcEvent = {
 }[IpcEventChannel]
 
 export type ItemSummary = z.output<typeof ItemSummarySchema>
+export type ItemPreview = z.output<(typeof IpcRequestSchema)['cairn:history.preview']['result']>

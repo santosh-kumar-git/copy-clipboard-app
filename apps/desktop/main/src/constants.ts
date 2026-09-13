@@ -1,7 +1,7 @@
 import { DEFAULT_ACCELERATOR } from '@cairn/protocol'
 
 /**
- * Spotlight-ish proportions. Fixed, because a resizable palette is a palette you have to aim at.
+ * Initial palette proportions; later openings preserve the user's native window bounds.
  *
  * The height is the SUM of the palette's fixed rows, not a round number: 460 was shorter than the
  * layout it contained, so the window clipped the bottom of itself — the preview pane showed one line
@@ -10,6 +10,9 @@ import { DEFAULT_ACCELERATOR } from '@cairn/protocol'
  */
 export const PALETTE_WIDTH = 720
 export const PALETTE_HEIGHT = 648
+export const PALETTE_MIN_WIDTH = 560
+export const PALETTE_MIN_HEIGHT = 480
+export const PALETTE_SCREEN_MARGIN = 16
 
 /** Spec §11 control 6: the decrypted preview cache is evicted after this much user idleness. */
 export const PREVIEW_CACHE_IDLE_MS = 300_000

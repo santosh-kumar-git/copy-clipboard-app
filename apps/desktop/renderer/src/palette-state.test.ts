@@ -10,6 +10,7 @@ import {
   MAX_TABS_PER_ITEM,
   PaletteState,
   RECALL_TOAST_TEXT,
+  ROW_HEIGHT_PX,
   SEARCH_LIMIT,
   SECRET_PIN_REFUSED_TEXT,
   TOAST_MS,
@@ -136,6 +137,36 @@ describe('labels', () => {
 })
 
 describe('PaletteState', () => {
+  it('loads the preview after keyboard navigation reaches an uncached page', async () => {
+    const last = makeItem(499)
+    const fake = createFakeApi({
+      items: Array.from({ length: 500 }, (_, i) => makeItem(i)),
+      previews: new Map([[last.id, { text: 'Last clip content', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('End')
+    await state.pending
+    expect(state.previewText).toBe('Last clip content')
+    state.dispose()
+  })
+
+  it('keeps the scrolled page when resizing with the selection off screen', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 500 }, (_, i) => makeItem(i)) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.setScrollTop(100 * ROW_HEIGHT_PX)
+    await state.pending
+    state.setViewportHeight(200)
+    await state.pending
+    expect(state.windowStart).toBe(100)
+    state.setViewportHeight(2000)
+    await state.pending
+    expect(state.windowStart).toBe(100)
+    expect(state.visibleRows.every((row) => row.item !== null)).toBe(true)
+    state.dispose()
+  })
+
   it('keeps the selected row fully visible when an editor reduces the list height', async () => {
     const fake = createFakeApi({ items: Array.from({ length: 20 }, (_, i) => makeItem(i)) })
     const state = new PaletteState({ api: fake.api, clock: createTestClock() })

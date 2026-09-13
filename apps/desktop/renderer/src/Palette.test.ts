@@ -1,6 +1,6 @@
 import { TOAST_COPIED_MANUAL, createTestClock } from '@cairn/protocol'
 import { flushSync, mount, unmount, type ComponentProps } from 'svelte'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ItemRow from './ItemRow.svelte'
 import Palette from './Palette.svelte'
 import {
@@ -275,6 +275,147 @@ describe('pin and delete', () => {
 })
 
 describe('the preview pane', () => {
+  it('reveals an image without copying and removes it from the DOM on reopening', async () => {
+    const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO8sAAAAASUVORK5CYII='
+    const item = makeItem(0, { kind: 'image', title: 'Private screenshot', preview: '' })
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: '', isHtmlSource: false, truncated: false, imageDataUrl }]]),
+    })
+    const state = await render(fake)
+    expect(host.querySelector('.preview-image')).toBeNull()
+    host.querySelector<HTMLButtonElement>('.row-view')!.click()
+    await state.pending
+    flushSync()
+    expect(host.querySelector('.preview-image')?.getAttribute('src')).toBe(imageDataUrl)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    fake.emitPaletteShown({ shownAt: 1234 })
+    await state.pending
+    flushSync()
+    expect(host.querySelector('.preview-image')).toBeNull()
+    expect(host.innerHTML).not.toContain(imageDataUrl)
+    state.dispose()
+  })
+
+  it.each(['https://example.com/tracker.png', 'data:image/svg+xml;base64,PHN2Zy8+'])(
+    'never loads an unsafe image preview: %s', async (imageDataUrl) => {
+      const item = makeItem(0, { kind: 'image', preview: '' })
+      const fake = createFakeApi({
+        items: [item],
+        previews: new Map([[item.id, { text: '', isHtmlSource: false, truncated: false, imageDataUrl }]]),
+      })
+      const state = await render(fake)
+      expect(host.querySelector('.preview-image')).toBeNull()
+      expect(host.textContent).toContain('Image preview unavailable.')
+      state.dispose()
+    },
+  )
+
+  it('views a scrolled clip without copying, closing, or moving the list', async () => {
+    const item = makeItem(105)
+    const fake = createFakeApi({
+      items: Array.from({ length: 500 }, (_, i) => makeItem(i)),
+      previews: new Map([[item.id, { text: 'Complete content\nSecond line', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = await render(fake)
+    state.setScrollTop(100 * ROW_HEIGHT_PX)
+    await state.pending
+    flushSync()
+    const view = host.querySelector<HTMLButtonElement>(`#cairn-row-${item.id} .row-view`)
+    expect(view).not.toBeNull()
+    view!.click()
+    await state.pending
+    flushSync()
+
+    expect(state.selectedItem?.id).toBe(item.id)
+    expect(state.windowStart).toBe(100)
+    expect(host.querySelector('[data-testid="preview"]')?.textContent).toBe('Complete content\nSecond line')
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it('reveals a titled clip only on an explicit view click and hides it on reopening', async () => {
+    const item = makeItem(0, { title: 'Work login', preview: '' })
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'private-test-value', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = await render(fake)
+    expect(host.textContent).not.toContain('private-test-value')
+    const view = host.querySelector<HTMLButtonElement>('.row-view')
+    expect(view).not.toBeNull()
+    view!.click()
+    await state.pending
+    flushSync()
+    expect(host.querySelector('[data-testid="preview"]')?.textContent).toBe('private-test-value')
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+
+    fake.emitPaletteShown({ shownAt: 1234 })
+    await state.pending
+    flushSync()
+    expect(host.textContent).not.toContain('private-test-value')
+    expect(host.querySelector('[data-testid="hidden-content"]')).not.toBeNull()
+    state.dispose()
+  })
+
+  it('resizes the preview using a keyboard divider without moving or copying the selected clip', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+    const divider = host.querySelector<HTMLElement>('[role="separator"]')
+    expect(divider).not.toBeNull()
+    const start = Number(divider!.getAttribute('aria-valuenow'))
+    const key = (value: string) => {
+      divider!.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }))
+      flushSync()
+    }
+    key('ArrowUp')
+    expect(Number(divider!.getAttribute('aria-valuenow'))).toBeLessThan(start)
+    key('Home')
+    expect(divider!.getAttribute('aria-valuenow')).toBe(divider!.getAttribute('aria-valuemin'))
+    key('End')
+    expect(divider!.getAttribute('aria-valuenow')).toBe(divider!.getAttribute('aria-valuemax'))
+    key('Enter')
+    expect(state.selectedIndex).toBe(0)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it('drags the divider within pane limits and stops resizing after releasing it', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    const state = await render(fake)
+    const container = host.querySelector<HTMLElement>('.content-panes')!
+    const divider = host.querySelector<HTMLElement>('[role="separator"]')!
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 100, 600, 400))
+    vi.spyOn(divider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 380, 600, 12))
+    divider.setPointerCapture = vi.fn()
+    divider.hasPointerCapture = () => true
+    divider.releasePointerCapture = vi.fn()
+    const pointer = (type: string, y: number) => {
+      const event = new MouseEvent(type, { clientY: y, button: 0, bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'pointerId', { value: 1 })
+      divider.dispatchEvent(event)
+      flushSync()
+    }
+    pointer('pointerdown', 384)
+    pointer('pointermove', 284)
+    expect(Number(divider.getAttribute('aria-valuenow'))).toBe(46)
+    pointer('pointermove', -100)
+    expect(divider.getAttribute('aria-valuenow')).toBe(divider.getAttribute('aria-valuemin'))
+    pointer('pointermove', 1000)
+    expect(divider.getAttribute('aria-valuenow')).toBe(divider.getAttribute('aria-valuemax'))
+    pointer('pointerup', 1000)
+    pointer('pointermove', 284)
+    expect(divider.getAttribute('aria-valuenow')).toBe(divider.getAttribute('aria-valuemax'))
+    expect(divider.releasePointerCapture).toHaveBeenCalledWith(1)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
   it('lists copied files one per line for a files item', async () => {
     const item = makeItem(0, { kind: 'files', preview: 'file:///Users/me/a%20b.txt' })
     const fake = createFakeApi({
@@ -310,6 +451,7 @@ describe('the props shape', () => {
       top: true,
       nowMs: true,
       onpick: true,
+      onview: true,
       onpin: true,
       ontag: true,
       ontitle: true,
@@ -323,6 +465,7 @@ describe('the props shape', () => {
       'onpin',
       'ontag',
       'ontitle',
+      'onview',
       'ranges',
       'selected',
       'top',
@@ -370,7 +513,7 @@ describe('the action bar', () => {
     const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
     const state = await render(fake)
     const buttons = [...rows()[1]!.querySelectorAll<HTMLButtonElement>('.row-btn')]
-    expect(buttons.length).toBe(4)
+    expect(buttons.length).toBe(5)
 
     buttons.find((button) => button.title === 'Delete')?.click()
     await state.pending

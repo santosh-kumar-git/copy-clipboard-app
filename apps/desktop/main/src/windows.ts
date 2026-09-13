@@ -1,4 +1,7 @@
-import { ALLOWED_DEV_ORIGINS, CSP_POLICY_DEV, CSP_POLICY_PROD, PALETTE_HEIGHT, PALETTE_WIDTH } from './constants'
+import {
+  ALLOWED_DEV_ORIGINS, CSP_POLICY_DEV, CSP_POLICY_PROD,
+  PALETTE_HEIGHT, PALETTE_MIN_HEIGHT, PALETTE_MIN_WIDTH, PALETTE_SCREEN_MARGIN, PALETTE_WIDTH,
+} from './constants'
 import type { Clock, IpcEventChannel, Logger } from '@cairn/protocol'
 
 export type RuntimeMode = 'packaged' | 'dev'
@@ -102,9 +105,9 @@ export interface PaletteWindowOptions {
   readonly height: number
   readonly show: false
   readonly frame: false
-  readonly transparent: true
-  readonly resizable: false
-  readonly movable: false
+  readonly transparent: false
+  readonly resizable: true
+  readonly movable: true
   readonly minimizable: false
   readonly maximizable: false
   readonly fullscreenable: false
@@ -112,7 +115,7 @@ export interface PaletteWindowOptions {
   readonly type: 'panel'
   readonly vibrancy: 'hud'
   readonly visualEffectState: 'active'
-  readonly backgroundColor: '#00000000'
+  readonly backgroundColor: '#22272a'
   readonly hasShadow: true
   readonly roundedCorners: true
   readonly acceptFirstMouse: true
@@ -128,12 +131,11 @@ export interface PaletteWindowOptions {
  * - `vibrancy: 'hud'`           the translucent Spotlight look.
  * - `visualEffectState:'active'` without it the vibrancy greys out, because another app is
  *                               frontmost the entire time the palette is open — which is always.
- * - `frame: false` + `transparent: true` + `backgroundColor: '#00000000'`  no title bar, and the
- *                               vibrancy shows through instead of a grey rectangle.
+ * - `frame: false` + `transparent: false` keeps native resizing supported without a title bar.
  * - `show: false`               spec §4: no window on launch. We are a background utility.
  * - `skipTaskbar: true`         never a window-list entry.
- * - `resizable/movable/minimizable/maximizable/fullscreenable: false`  a palette you can drag out
- *                               of position or minimise is a palette you have to hunt for.
+ * - `resizable/movable: true` allows edge resizing and dragging from the renderer's header.
+ * - `minimizable/maximizable/fullscreenable: false` keeps the palette in its floating window mode.
  * - `hasShadow` + `roundedCorners`  so a frameless transparent window still reads as a window.
  * - `acceptFirstMouse: true`    the first click after the palette appears selects a row instead of
  *                               being eaten to activate the window.
@@ -144,9 +146,9 @@ export function paletteWindowOptions(o: { mode: RuntimeMode; preloadPath: string
     height: PALETTE_HEIGHT,
     show: false,
     frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
+    transparent: false,
+    resizable: true,
+    movable: true,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -154,7 +156,7 @@ export function paletteWindowOptions(o: { mode: RuntimeMode; preloadPath: string
     type: 'panel',
     vibrancy: 'hud',
     visualEffectState: 'active',
-    backgroundColor: '#00000000',
+    backgroundColor: '#22272a',
     hasShadow: true,
     roundedCorners: true,
     acceptFirstMouse: true,
@@ -241,7 +243,9 @@ export interface BrowserWindowLike {
     setBackgroundThrottling(enabled: boolean): void
   }
   setAlwaysOnTop(flag: boolean, level: string): void
+  getBounds(): { x: number; y: number; width: number; height: number }
   setBounds(bounds: { x: number; y: number; width: number; height: number }): void
+  setMinimumSize(width: number, height: number): void
   setVisibleOnAllWorkspaces(
     visible: boolean,
     opts: { visibleOnFullScreen: boolean; skipTransformProcessType: boolean },
@@ -283,17 +287,20 @@ export function createPaletteWindow(deps: {
 }): PaletteController {
   const { BrowserWindowCtor, screen, mode, preloadPath, rendererIndexPath, env, logger } = deps
   const win = new BrowserWindowCtor(paletteWindowOptions({ mode, preloadPath }))
+  let hasPlacedWindow = false
   let shown = false
+  let presented = false
   let awaitingShownAt: number | null = null
   const hide = (): void => {
     if (!shown) return
+    presented = false
     shown = false
     awaitingShownAt = null
     if (win.isVisible()) win.hide()
   }
   win.webContents.setBackgroundThrottling(false)
   win.on('blur', () => {
-    if (!win.isFocused()) hide()
+    if (presented && !win.isFocused()) hide()
   })
 
   // 'screen-saver' is the only always-on-top level that clears a full-screen app.
@@ -316,15 +323,31 @@ export function createPaletteWindow(deps: {
     show() {
       hide()
       const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
-      const width = Math.min(PALETTE_WIDTH, Math.max(1, workArea.width - 32))
-      const height = Math.min(PALETTE_HEIGHT, Math.max(1, workArea.height - 32))
-      // Recompute before showing so a reused palette follows the user's current display.
+      const previous = hasPlacedWindow ? win.getBounds() : null
+      const maxWidth = Math.max(1, workArea.width - PALETTE_SCREEN_MARGIN * 2)
+      const maxHeight = Math.max(1, workArea.height - PALETTE_SCREEN_MARGIN * 2)
+      const minWidth = Math.min(PALETTE_MIN_WIDTH, maxWidth)
+      const minHeight = Math.min(PALETTE_MIN_HEIGHT, maxHeight)
+      const width = Math.min(maxWidth, Math.max(minWidth, previous?.width ?? PALETTE_WIDTH))
+      const height = Math.min(maxHeight, Math.max(minHeight, previous?.height ?? PALETTE_HEIGHT))
+      const marginX = Math.min(PALETTE_SCREEN_MARGIN, Math.floor((workArea.width - width) / 2))
+      const marginY = Math.min(PALETTE_SCREEN_MARGIN, Math.floor((workArea.height - height) / 2))
+      const onDisplay = previous !== null &&
+        previous.x < workArea.x + workArea.width && previous.x + previous.width > workArea.x &&
+        previous.y < workArea.y + workArea.height && previous.y + previous.height > workArea.y
+      // Recenter only when the saved bounds no longer intersect the display under the pointer.
+      win.setMinimumSize(minWidth, minHeight)
       win.setBounds({
-        x: Math.round(workArea.x + (workArea.width - width) / 2),
-        y: Math.round(workArea.y + (workArea.height - height) / 2),
+        x: onDisplay
+          ? Math.max(workArea.x + marginX, Math.min(previous.x, workArea.x + workArea.width - width - marginX))
+          : Math.round(workArea.x + (workArea.width - width) / 2),
+        y: onDisplay
+          ? Math.max(workArea.y + marginY, Math.min(previous.y, workArea.y + workArea.height - height - marginY))
+          : Math.round(workArea.y + (workArea.height - height) / 2),
         width,
         height,
       })
+      hasPlacedWindow = true
       win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
       shown = true
     },
@@ -335,6 +358,7 @@ export function createPaletteWindow(deps: {
       // An accessory app is not activated by show() alone, so the search field would get no
       // keystrokes. focus() is what makes typing work.
       win.focus()
+      presented = true
       return true
     },
     hide,

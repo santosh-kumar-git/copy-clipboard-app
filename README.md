@@ -120,6 +120,11 @@ temporarily; reopening the palette hides it again. Clicking the row still copies
 Save an empty title to remove it. Titles are encrypted with the history and do not change secret expiry
 or retention rules.
 
+Click a row's **eye icon** to view its content without copying or closing the palette. PNG and JPEG
+images up to 8 MiB also appear in the preview. Drag the top bar to move the window or its edges to resize
+it; the size and position are remembered until you quit. Drag the divider above Preview to change its
+height, or focus the divider and use ↑↓. Double-click the divider to reset it.
+
 Signing, notarization, a login item and auto-update are Milestone 3.
 
 ## Settings

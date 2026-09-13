@@ -7,8 +7,11 @@
     text: string
     mime: 'text/plain' | 'text/html'
     filePaths?: readonly string[]
+    imageDataUrl?: string | null
+    imageOnly?: boolean
+    truncated?: boolean
   }
-  let { text, mime, filePaths = [] }: Props = $props()
+  let { text, mime, filePaths = [], imageDataUrl = null, imageOnly = false, truncated = false }: Props = $props()
 </script>
 
 {#if mime === 'text/html'}
@@ -19,4 +22,11 @@
     {#each filePaths as path, i (i)}<li>{path}</li>{/each}
   </ul>
 {/if}
-<pre class="preview-body" data-testid="preview">{text}</pre>
+{#if imageDataUrl !== null}
+  <img class="preview-image" data-testid="preview-image" src={imageDataUrl} alt="Clipboard preview" />
+{:else if imageOnly && text.length === 0}
+  <p class="preview-note">Image preview unavailable.</p>
+{:else}
+  <pre class="preview-body" data-testid="preview">{text}</pre>
+{/if}
+{#if truncated}<p class="preview-note">Preview shortened for this large clip.</p>{/if}

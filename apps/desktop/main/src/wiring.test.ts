@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import sharp from 'sharp'
 import {
+  contentHash,
   createTestClock,
   err,
+  fixturePath,
   ok,
   TOAST_COPIED_MANUAL,
   type AgentCapabilities,
@@ -32,9 +36,9 @@ const silentLogger = (): Logger => {
   return { log: noop, debug: noop, info: noop, warn: noop, error: noop }
 }
 
-const rep = (mime: string, text: string): ResolvedRep => {
-  const bytes = new TextEncoder().encode(text)
-  return { mime, uti: null, bytes, byteLength: bytes.length, sha256: HASH }
+const rep = (mime: string, body: string | Uint8Array): ResolvedRep => {
+  const bytes = Buffer.from(body)
+  return { mime, uti: null, bytes, byteLength: bytes.length, sha256: contentHash(bytes) }
 }
 
 function build(over: {
@@ -535,6 +539,68 @@ describe('previewText', () => {
       expect(r.value.text).toHaveLength(8_192)
       expect(r.value.truncated).toBe(true)
     }
+  })
+
+  it.each(['png', 'jpeg'] as const)('returns a valid %s only through explicit preview IPC without copying or closing', async (format) => {
+    const source = readFileSync(fixturePath('formats', 'screenshot.png'))
+    const bytes = format === 'png' ? source : await sharp(source).jpeg().toBuffer()
+    const h = build({ reps: [rep(`image/${format}`, bytes)] })
+    await h.app.start()
+    expect(h.sent.some(([, payload]) => JSON.stringify(payload).includes('data:image/'))).toBe(false)
+    const requestCount = h.agentRequests.length
+    const reply = await h.registered.get('cairn:history.preview')!({}, { id: ID })
+    expect(reply).toEqual({
+      ok: true,
+      value: {
+        text: '', isHtmlSource: false, truncated: false,
+        imageDataUrl: `data:image/${format};base64,${bytes.toString('base64')}`,
+      },
+    })
+    expect(h.agentRequests).toHaveLength(requestCount)
+    expect(h.paletteCalls).not.toContain('hide')
+  })
+
+  it.each(['text/plain', 'text/uri-list', 'text/html', 'text/rtf'])('preserves %s preference and its text cap when an image is also present', async (mime) => {
+    const png = readFileSync(fixturePath('formats', 'screenshot.png'))
+    const h = build({ reps: [rep('image/png', png), rep(mime, 'x'.repeat(9_000))] })
+    expect(await h.app.previewText(ID)).toEqual({
+      ok: true, value: { text: 'x'.repeat(8_192), isHtmlSource: mime === 'text/html', truncated: true },
+    })
+  })
+
+  it.each([
+    ['image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'],
+    ['image/gif', 'GIF89a'],
+    ['image/tiff', 'synthetic TIFF'],
+    ['image/png', '<svg/>'],
+    ['image/jpeg', 'not a JPEG'],
+  ])('omits unsupported or mislabeled %s bytes', async (mime, body) => {
+    const h = build({ reps: [rep(mime, body)] })
+    expect(await h.app.previewText(ID)).toEqual({
+      ok: true, value: { text: '', isHtmlSource: false, truncated: false },
+    })
+  })
+
+  it('bounds original image bytes at 8 MiB instead of trusting declared byteLength', async () => {
+    const png = readFileSync(fixturePath('formats', 'screenshot.png'))
+    const bytes = Buffer.alloc(8 * 1024 * 1024 + 1)
+    png.copy(bytes)
+    const oversized = { ...rep('image/png', bytes), byteLength: png.length }
+    expect(await build({ reps: [oversized] }).app.previewText(ID)).toEqual({
+      ok: true, value: { text: '', isHtmlSource: false, truncated: false },
+    })
+    const bounded = bytes.subarray(0, -1)
+    const result = await build({ reps: [rep('image/png', bounded)] }).app.previewText(ID)
+    expect(result.ok && result.value.imageDataUrl?.length).toBe('data:image/png;base64,'.length + Math.ceil(bounded.length / 3) * 4)
+  })
+
+  it('can use a supported JPEG when an earlier PNG cannot be previewed', async () => {
+    const png = readFileSync(fixturePath('formats', 'screenshot.png'))
+    const jpeg = await sharp(png).jpeg().toBuffer()
+    const h = build({ reps: [rep('image/png', '<svg/>'), rep('image/jpeg', jpeg)] })
+    expect(await h.app.previewText(ID)).toMatchObject({
+      ok: true, value: { imageDataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}` },
+    })
   })
 })
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import ItemRow from './ItemRow.svelte'
   import Preview from './Preview.svelte'
+  import SplitPane from './SplitPane.svelte'
   import Toast from './Toast.svelte'
   import {
     ALL_TAB,
@@ -9,7 +10,6 @@
     PaletteState,
     ROW_HEIGHT_PX,
     TAG_PLACEHOLDER,
-    VISIBLE_ROWS,
     filePathsFromPreview,
     hotkeyFailedText,
     sameTab,
@@ -275,13 +275,14 @@
     <div class="status-row" data-testid="status-text" role="status">{palette.statusText}</div>
   {/if}
 
+  <SplitPane>
+  {#snippet list()}
   <div
     bind:this={listEl}
     id="cairn-results"
     class="results"
     role="listbox"
     aria-label="Clipboard history"
-    style="height: {VISIBLE_ROWS * ROW_HEIGHT_PX}px"
     onscroll={(event) => palette.setScrollTop(event.currentTarget.scrollTop)}
   >
     {#if palette.total === 0}
@@ -301,6 +302,7 @@
                 palette.selectedIndex = row.index
                 palette.pending = palette.recall()
               }}
+              onview={() => (palette.pending = palette.viewItem(row.index))}
               onpin={() => {
                 palette.hidePreview()
                 palette.selectedIndex = row.index
@@ -329,8 +331,10 @@
       </div>
     {/if}
   </div>
+  {/snippet}
 
-  <div class="preview-pane">
+  {#snippet preview()}
+  <div class="preview-pane" id="cairn-preview">
     <div class="preview-heading">
       <span>Preview</span>
       {#if selected !== null}
@@ -358,9 +362,13 @@
         >
       </div>
     {:else}
-      <Preview text={palette.previewText} mime={palette.previewMime} {filePaths} />
+      <Preview text={palette.previewText} mime={palette.previewMime} {filePaths}
+        imageDataUrl={palette.previewImageUrl} imageOnly={selected?.kind === 'image'}
+        truncated={palette.previewTruncated} />
     {/if}
   </div>
+  {/snippet}
+  </SplitPane>
 
   <!-- Real buttons, not a legend. Pin, tab and delete are all still keyboard shortcuts, and each
        one is now also something you can click, which is how it becomes discoverable. -->

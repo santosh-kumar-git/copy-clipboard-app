@@ -1,12 +1,15 @@
 import {
   err,
   ok,
+  PREVIEW_IMAGE_MAX_BYTES,
+  PreviewImageDataUrlSchema,
   TOAST_COPIED_MANUAL,
   type Candidate,
   type Cancel,
   type Clock,
   type ClipboardAgent,
   type ItemId,
+  type ItemPreview,
   type KeyringMode,
   type Logger,
   type Result,
@@ -88,7 +91,7 @@ export interface CairnApp {
   setHistoryLimit(maxItems: number): Promise<void>
   evictPreviewCache(reason: EvictReason): void
   recallCopy(id: ItemId): Promise<Result<{ result: 'copied-manual'; reason: 'user-preference' }>>
-  previewText(id: ItemId): Promise<Result<{ text: string; isHtmlSource: boolean; truncated: boolean }>>
+  previewText(id: ItemId): Promise<Result<ItemPreview>>
   securityStatus(): {
     keyringMode: KeyringMode
     encryptedAtRest: boolean
@@ -108,6 +111,17 @@ function previewRep(reps: readonly ResolvedRep[]): ResolvedRep | undefined {
     reps.find((r) => r.mime === 'text/html') ??
     reps.find((r) => r.mime.startsWith('text/'))
   )
+}
+
+function previewImage(reps: readonly ResolvedRep[]): string | undefined {
+  for (const mime of ['image/png', 'image/jpeg']) {
+    for (const rep of reps) {
+      if (rep.mime !== mime || rep.bytes.byteLength === 0 || rep.bytes.byteLength > PREVIEW_IMAGE_MAX_BYTES) continue
+      const dataUrl = `data:${mime};base64,${Buffer.from(rep.bytes).toString('base64')}`
+      if (PreviewImageDataUrlSchema.safeParse(dataUrl).success) return dataUrl
+    }
+  }
+  return undefined
 }
 
 /**
@@ -270,11 +284,17 @@ export function composeApp(deps: ComposeDeps): CairnApp {
 
   const previewText = async (
     id: ItemId,
-  ): Promise<Result<{ text: string; isHtmlSource: boolean; truncated: boolean }>> => {
+  ): Promise<Result<ItemPreview>> => {
     const resolved = await history.resolveReps(id)
     if (!resolved.ok) return resolved
     const chosen = previewRep(resolved.value)
-    if (chosen === undefined) return ok({ text: '', isHtmlSource: false, truncated: false })
+    if (chosen === undefined) {
+      const imageDataUrl = previewImage(resolved.value)
+      return ok({
+        text: '', isHtmlSource: false, truncated: false,
+        ...(imageDataUrl === undefined ? {} : { imageDataUrl }),
+      })
+    }
     // Decoded as text and returned as text. Spec §11 control 3: copied HTML is NEVER rendered as
     // HTML — when the item is HTML this is the source, and `isHtmlSource` only labels the pane.
     const full = new TextDecoder('utf-8', { fatal: false }).decode(chosen.bytes)

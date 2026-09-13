@@ -80,10 +80,15 @@ export function parsePaletteShown(u: unknown): PaletteShownPayload | null {
 
 export const THUMBNAIL_DATA_URL_PREFIX = 'data:image/jpeg;base64,'
 
-/** The ONLY value ever placed in an <img src>. Anything else becomes null. */
+/** Thumbnails accept only bounded JPEG data URLs. */
 export function safeThumbnailSrc(value: ItemSummary['thumbnailDataUrl']): string | null {
   if (typeof value !== 'string') return null
   if (!value.startsWith(THUMBNAIL_DATA_URL_PREFIX)) return null
   if (value.length > 64 * 1024) return null
   return value
+}
+
+export function safePreviewImageSrc(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || value.length > 4 * Math.ceil(8 * 1024 * 1024 / 3) + 32) return null
+  return /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(value) ? value : null
 }

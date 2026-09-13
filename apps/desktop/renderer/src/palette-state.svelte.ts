@@ -5,6 +5,7 @@ import {
   parseHotkeyStatus,
   parsePaletteShown,
   parseToast,
+  safePreviewImageSrc,
   type CairnBridge,
   type CopyReason,
   type HotkeyStatus,
@@ -15,7 +16,7 @@ import {
 export const ROW_HEIGHT_PX = 44
 export const VISIBLE_ROWS = 8
 export const OVERSCAN_ROWS = 2
-/** Rows fetched per `list` call. The renderer never holds more than this many previews. */
+/** Minimum page size; taller windows fetch enough rows to cover the viewport. */
 export const FETCH_SPAN = 32
 export const SEARCH_LIMIT = 50
 export const TOAST_MS = 2_000
@@ -246,6 +247,8 @@ export class PaletteState {
   statusText: string | null = $state(null)
   previewText = $state('')
   previewMime: 'text/plain' | 'text/html' = $state('text/plain')
+  previewImageUrl: string | null = $state(null)
+  previewTruncated = $state(false)
   shownAt = $state(0)
   nowMs = $state(0)
   /** Every tab that has at least one item, counted over the whole history, not the loaded page. */
@@ -423,7 +426,14 @@ export class PaletteState {
     this.hidePreview()
     this.selectedIndex = nextIndex(this.selectedIndex, key, this.total)
     this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total, this.viewportRows)
-    this.pending = Promise.all([this.ensureLoaded(), this.loadPreview()])
+    this.pending = this.ensureLoaded().then(() => this.loadPreview())
+  }
+
+  async viewItem(index: number): Promise<void> {
+    if (this.rowAt(index) === null) return
+    this.hidePreview()
+    this.selectedIndex = index
+    await this.revealPreview()
   }
 
   setScrollTop(px: number): void {
@@ -435,8 +445,12 @@ export class PaletteState {
   setViewportHeight(px: number): void {
     const rows = Math.max(1, Math.floor(px / ROW_HEIGHT_PX))
     if (rows === this.viewportRows) return
+    const selectionVisible = this.selectedIndex >= this.windowStart &&
+      this.selectedIndex < this.windowStart + this.viewportRows
     this.viewportRows = rows
-    this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total, rows)
+    this.windowStart = selectionVisible
+      ? windowStartFor(this.selectedIndex, this.windowStart, this.total, rows)
+      : Math.min(this.windowStart, Math.max(0, this.total - rows))
     this.pending = this.ensureLoaded()
   }
 
@@ -451,7 +465,7 @@ export class PaletteState {
     const seq = ++this.#listSeq
     try {
       const res = await this.#deps.api.list({
-        limit: FETCH_SPAN,
+        limit: Math.min(200, Math.max(FETCH_SPAN, this.viewportRows + OVERSCAN_ROWS * 2)),
         offset,
         ...tabFilter(this.activeTab),
       })
@@ -478,12 +492,16 @@ export class PaletteState {
     if (item === null || this.contentHidden) {
       this.previewText = ''
       this.previewMime = 'text/plain'
+      this.previewImageUrl = null
+      this.previewTruncated = false
       return
     }
     try {
       const res = await this.#deps.api.preview({ id: item.id })
       if (seq !== this.#previewSeq) return
       this.previewText = res.text
+      this.previewImageUrl = safePreviewImageSrc(res.imageDataUrl)
+      this.previewTruncated = res.truncated
       // `text` is ALWAYS plain text: for an HTML item it is the HTML *source*, and `isHtmlSource`
       // only labels the pane. Nothing here ever becomes markup.
       this.previewMime = res.isHtmlSource ? 'text/html' : 'text/plain'
@@ -491,6 +509,8 @@ export class PaletteState {
       if (seq !== this.#previewSeq) return
       this.previewText = ''
       this.previewMime = 'text/plain'
+      this.previewImageUrl = null
+      this.previewTruncated = false
     }
   }
 
@@ -611,6 +631,8 @@ export class PaletteState {
     this.#previewSeq += 1
     this.previewText = ''
     this.previewMime = 'text/plain'
+    this.previewImageUrl = null
+    this.previewTruncated = false
   }
 
   async commitTag(): Promise<void> {
