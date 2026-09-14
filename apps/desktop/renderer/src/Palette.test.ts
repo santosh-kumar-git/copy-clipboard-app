@@ -87,7 +87,7 @@ describe('dragging clips into tabs', () => {
     expect(transfer.types).toEqual(['application/x-cairn-item-id'])
     expect(transfer.getData(transfer.types[0]!)).toBe(second.id)
     expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(true)
-    expect(target.classList.contains('tab-drop-target')).toBe(true)
+    expect(target.closest('.tab-entry')?.classList.contains('tab-drop-target')).toBe(true)
     drag(target, 'drop', transfer)
     await state.pending
     flushSync()
@@ -880,6 +880,85 @@ describe('title editing', () => {
 })
 
 describe('tabs', () => {
+  it('creates an empty tab without assigning or requiring a selected clip', async () => {
+    const fake = createFakeApi()
+    const state = await render(fake)
+    const create = host.querySelector<HTMLButtonElement>('[data-testid="new-tab"]')!
+    expect(create.disabled).toBe(false)
+    create.click()
+    flushSync()
+    const input = host.querySelector<HTMLInputElement>('[data-testid="new-tab-input"]')!
+    expect(input).not.toBeNull()
+    input.value = ' Work '
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await state.pending
+    flushSync()
+    expect(fake.createTabCalls).toEqual([{ tag: 'Work' }])
+    expect(state.tabs).toEqual([{ tag: 'work', count: 0 }])
+    expect(fake.tagCalls).toEqual([])
+    expect(fake.copyCalls).toEqual([])
+    expect(state.activeTab).toEqual({ kind: 'all' })
+    expect(document.activeElement).toBe(host.querySelector('.search'))
+  })
+
+  it('deletes only the tab and returns to All without deleting or copying clips', async () => {
+    const fake = createFakeApi({ items: [makeItem(0, { tags: ['work', 'home'] }), makeItem(1, { tags: ['work'], pinned: true })] })
+    const state = await render(fake)
+    await state.selectTab({ kind: 'tag', tag: 'work' })
+    flushSync()
+    const remove = host.querySelector<HTMLButtonElement>('[aria-label="Delete tab work"]')!
+    expect(remove).not.toBeNull()
+    remove.focus()
+    remove.click()
+    await state.pending
+    flushSync()
+    expect(fake.removeTabCalls).toEqual([{ tag: 'work' }])
+    expect(state.activeTab).toEqual({ kind: 'all' })
+    expect(state.total).toBe(2)
+    expect(fake.items.map(item => item.tags)).toEqual([['home'], []])
+    expect(fake.items[1]?.pinned).toBe(true)
+    expect(fake.removeCalls).toEqual([])
+    expect(fake.copyCalls).toEqual([])
+    expect(host.querySelector('[aria-label="Delete tab work"]')).toBeNull()
+    expect(host.querySelector('[aria-label="Delete tab All"]')).toBeNull()
+    expect(host.querySelector('[aria-label="Delete tab Pinned"]')).toBeNull()
+    expect(document.activeElement).toBe(host.querySelector('.search'))
+  })
+
+  it('keeps existing-tab assignment separate from creating a new tab', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1, { tags: ['work'] })] })
+    const state = await render(fake)
+    press('t', { metaKey: true })
+    expect(host.querySelector('[aria-label="Add to work"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="new-tab-input"]')).toBeNull()
+    expect(host.querySelector('[data-testid="tag-input"]')).toBeNull()
+    state.dispose()
+  })
+
+  it('keeps tab edits recoverable when saving fails and cancels without closing the app', async () => {
+    const fake = createFakeApi({ items: [makeItem(0, { tags: ['work'] })] })
+    fake.failTabManagement = true
+    const state = await render(fake)
+    state.openTabCreation()
+    state.newTabDraft = 'Personal'
+    await state.createTab()
+    flushSync()
+    expect(state.tabCreating).toBe(true)
+    expect(state.newTabDraft).toBe('Personal')
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('Could not create')
+    pressFocused('Escape')
+    expect(state.tabCreating).toBe(false)
+    expect(fake.closeCalls).toBe(0)
+    await state.selectTab({ kind: 'tag', tag: 'work' })
+    await state.removeTab('work')
+    expect(state.activeTab).toEqual({ kind: 'tag', tag: 'work' })
+    expect(state.total).toBe(1)
+    expect(fake.items[0]?.tags).toEqual(['work'])
+    expect(fake.removeCalls).toEqual([])
+    state.dispose()
+  })
+
   it('offers existing tabs as clickable choices and shows current membership', async () => {
     const fake = createFakeApi({ items: [
       makeItem(0, { tags: ['home'] }), makeItem(1, { tags: ['work'] }),
@@ -895,7 +974,6 @@ describe('tabs', () => {
     expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work', tagged: true }])
     expect(host.querySelector('[aria-label="Remove from work"]')?.getAttribute('aria-pressed')).toBe('true')
     expect(state.tagging).toBe(true)
-    expect(state.tagDraft).toBe('')
     host.querySelector<HTMLButtonElement>('[aria-label="Done tagging"]')!.click()
     flushSync()
     expect(state.tagging).toBe(false)
@@ -915,18 +993,43 @@ describe('tabs', () => {
     await state.pending
     flushSync()
     expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'home', tagged: false }])
-    const work = host.querySelector<HTMLButtonElement>('[aria-label="Add to work"]')!
-    work.focus()
-    expect(pressFocused('ArrowDown').defaultPrevented).toBe(false)
+    expect(pressFocused('ArrowDown').defaultPrevented).toBe(true)
     expect(state.selectedIndex).toBe(1)
-    expect(document.activeElement).toBe(work)
+    expect(document.activeElement?.closest('.tag-options')).not.toBeNull()
   })
 
-  it('keeps navigation keys in the tab-name editor so they cannot tag a different clip', async () => {
+  it('keeps keyboard focus while assigning and after a legacy tab disappears', async () => {
+    const fake = createFakeApi({ items: [
+      makeItem(0, { tags: ['home'] }), makeItem(1, { tags: ['work'] }),
+    ] })
+    fake.tabNames.delete('home')
+    const state = await render(fake)
+    press('t', { metaKey: true })
+    const focused = document.activeElement as HTMLButtonElement
+    expect(focused.getAttribute('aria-label')).toBe('Remove from home')
+    fake.deferred = true
+    focused.click()
+    flushSync()
+    expect(focused.disabled).toBe(false)
+    expect(focused.getAttribute('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(focused)
+    fake.deferred = false
+    fake.pending.shift()!()
+    await state.pending
+    flushSync()
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Add to work')
+    pressFocused('Escape')
+    expect(state.tagging).toBe(false)
+    expect(fake.closeCalls).toBe(0)
+    expect(document.activeElement).toBe(host.querySelector('.search'))
+  })
+
+  it('keeps navigation keys in tab creation and never assigns the selected clip', async () => {
     const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
     const state = await render(fake)
-    pressFocused('t', { metaKey: true })
-    const field = host.querySelector<HTMLInputElement>('[data-testid="tag-input"]')!
+    host.querySelector<HTMLButtonElement>('[data-testid="new-tab"]')!.click()
+    flushSync()
+    const field = host.querySelector<HTMLInputElement>('[data-testid="new-tab-input"]')!
     field.value = 'work'
     field.dispatchEvent(new Event('input', { bubbles: true }))
     for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End']) {
@@ -936,7 +1039,8 @@ describe('tabs', () => {
     }
     pressFocused('Enter')
     await state.pending
-    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work', tagged: true }])
+    expect(fake.createTabCalls).toEqual([{ tag: 'work' }])
+    expect(fake.tagCalls).toEqual([])
     expect(fake.copyCalls).toEqual([])
     state.dispose()
   })
@@ -950,7 +1054,7 @@ describe('tabs', () => {
     const labels = [...host.querySelectorAll('[data-testid="tabs"] .tab')].map((b) =>
       (b.textContent ?? '').trim(),
     )
-    expect(labels).toEqual(['All', 'Pinned1', 'work1', '+ Tab'])
+    expect(labels).toEqual(['All', 'Pinned1', 'work1'])
   })
 
   it('shows only that tab’s items when a tab is clicked, and says so when it is empty', async () => {
@@ -975,23 +1079,32 @@ describe('tabs', () => {
     )
   })
 
-  it('files the selected copy into a new tab from the tab field, which is what creates the tab', async () => {
+  it('adds a clip by dragging it onto a newly created empty tab', async () => {
     const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
     const state = await render(fake)
 
-    press('t', { metaKey: true })
+    host.querySelector<HTMLButtonElement>('[data-testid="new-tab"]')!.click()
     flushSync()
-    const field = host.querySelector<HTMLInputElement>('[data-testid="tag-input"]')
+    const field = host.querySelector<HTMLInputElement>('[data-testid="new-tab-input"]')
     expect(field).not.toBeNull()
 
-    state.tagDraft = ' Work  Notes '
-    await state.commitTag()
+    state.newTabDraft = ' Work  Notes '
+    await state.createTab()
     flushSync()
 
-    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: ' Work  Notes ', tagged: true }])
-    // The tab bar grew a tab because an item now carries the name: there is no separate registry.
+    expect(fake.tagCalls).toEqual([])
+    expect(state.tabs).toEqual([{ tag: 'work notes', count: 0 }])
+    const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('work notes'))!
+    const transfer = clipTransfer()
+    drag(rows()[0]!, 'dragstart', transfer)
+    drag(target, 'drop', transfer)
+    await state.pending
+    flushSync()
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work notes', tagged: true }])
     expect(state.tabs).toEqual([{ tag: 'work notes', count: 1 }])
-    expect(host.querySelector('[data-testid="tag-input"]')).toBe(null)
+    expect(host.querySelector('[data-testid="new-tab-input"]')).toBe(null)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
   })
 
   it('says why when an item is already in as many tabs as it can be', async () => {
@@ -1000,8 +1113,7 @@ describe('tabs', () => {
     const state = await render(fake)
 
     state.openTagging()
-    state.tagDraft = 'ninth'
-    await state.commitTag()
+    await state.toggleTag('ninth')
     flushSync()
 
     expect(host.querySelector('[data-testid="toast"]')?.textContent).toBe(

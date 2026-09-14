@@ -89,6 +89,14 @@ interface Harness {
   readonly unregister: Unsub
 }
 
+it('creates and deletes tabs through dedicated operations without deleting clips', async () => {
+  const h = harness()
+  expect(await h.ipc.call('cairn:tabs.create', { tag: 'Work' })).toEqual(ok({ tag: 'work', created: true }))
+  expect(await h.ipc.call('cairn:tabs.remove', { tag: 'work' })).toEqual(ok({ removed: true, untagged: 2 }))
+  expect(h.domainCalls).toEqual(['createTab Work', 'removeTab work'])
+  h.unregister()
+})
+
 function harness(over: { historyItems?: readonly Item[]; readyResult?: boolean } = {}): Harness {
   const ipc = fakeIpcMain()
   const { logger, events } = silentLogger()
@@ -119,6 +127,14 @@ function harness(over: { historyItems?: readonly Item[]; readyResult?: boolean }
     tag: async (id: ItemId, tag: string, tagged: boolean) => {
       domainCalls.push(`tag ${id} ${tag} ${String(tagged)}`)
       return ok({ tags: tagged ? [tag] : [] })
+    },
+    createTab: async (tag: string) => {
+      domainCalls.push(`createTab ${tag}`)
+      return ok({ tag: tag.trim().toLowerCase(), created: true })
+    },
+    removeTab: async (tag: string) => {
+      domainCalls.push(`removeTab ${tag}`)
+      return ok({ removed: true, untagged: 2 })
     },
     setTitle: async (id: ItemId, title: string | null) => {
       titles.push({ id, title })

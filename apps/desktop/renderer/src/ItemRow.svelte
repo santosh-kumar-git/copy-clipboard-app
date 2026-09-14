@@ -58,6 +58,9 @@
   style="top: {top}px; height: {ROW_HEIGHT_PX}px"
   onclick={onpick}
 >
+  <span class="drag-handle" title="Drag this clip onto a tab" aria-hidden="true">
+    <svg viewBox="0 0 10 16"><circle cx="3" cy="4" r="1"/><circle cx="7" cy="4" r="1"/><circle cx="3" cy="8" r="1"/><circle cx="7" cy="8" r="1"/><circle cx="3" cy="12" r="1"/><circle cx="7" cy="12" r="1"/></svg>
+  </span>
   <span class="chip" data-kind={item.kind}>{kindChipLabel(item.kind)}</span>
   {#if thumbnail !== null}
     <img class="thumb" src={thumbnail} alt="" width="32" height="32" draggable="false" />
@@ -120,10 +123,10 @@
     <button
       type="button"
       class="row-btn"
-      title="File into a tab (kept, never evicted)"
-      aria-label={`File ${label} into a tab`}
+      title="Add to tab (⌘T)"
+      aria-label={`Add ${label} to a tab`}
       onmousedown={(e) => e.preventDefault()}
-      onclick={act(ontag)}>#</button
+      onclick={act(ontag)}><svg class="tab-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 6V4.5h6l2 2h7v10h-15Z"/><path d="M10 9v5m-2.5-2.5h5"/></svg></button
     >
     <button
       type="button"

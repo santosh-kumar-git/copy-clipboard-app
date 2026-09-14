@@ -29,6 +29,8 @@ export interface CairnBridge {
   preview(params: { id: string }): Promise<PreviewResult>
   pin(params: { id: string; pinned: boolean }): Promise<{ pinned: boolean }>
   tag(params: { id: string; tag: string; tagged: boolean }): Promise<{ tags: string[] }>
+  createTab(params: { tag: string }): Promise<{ tag: string; created: boolean }>
+  removeTab(params: { tag: string }): Promise<{ removed: boolean; untagged: number }>
   setTitle(params: { id: string; title: string | null }): Promise<{ title: string | null }>
   remove(params: { id: string }): Promise<{ removed: boolean }>
   copy(params: { id: string }): Promise<CopyResult>

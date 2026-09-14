@@ -40,6 +40,10 @@ export interface FakeApi {
   readonly copyCalls: string[]
   readonly pinCalls: { id: string; pinned: boolean }[]
   readonly tagCalls: { id: string; tag: string; tagged: boolean }[]
+  readonly createTabCalls: { tag: string }[]
+  readonly removeTabCalls: { tag: string }[]
+  readonly tabNames: Set<string>
+  failTabManagement: boolean
   readonly titleCalls: { id: string; title: string | null }[]
   readonly readyCalls: { shownAt: number }[]
   failTitle: boolean
@@ -66,7 +70,7 @@ export interface FakeApi {
 }
 
 export function createFakeApi(
-  init: Partial<Pick<FakeApi, 'items' | 'searchHitsFor' | 'previews' | 'copyResult'>> = {},
+  init: Partial<Pick<FakeApi, 'items' | 'searchHitsFor' | 'previews' | 'copyResult'>> & { tabs?: readonly string[] } = {},
 ): FakeApi {
   const listeners = {
     'history.changed': [] as ((p: unknown) => void)[],
@@ -94,6 +98,10 @@ export function createFakeApi(
     copyCalls: [],
     pinCalls: [],
     tagCalls: [],
+    createTabCalls: [],
+    removeTabCalls: [],
+    tabNames: new Set([...(init.tabs ?? []), ...(init.items ?? []).flatMap(item => item.tags)]),
+    failTabManagement: false,
     titleCalls: [],
     readyCalls: [],
     failTitle: false,
@@ -126,7 +134,7 @@ export function createFakeApi(
     (p.pinnedOnly !== true || it.pinned) && (p.tag === undefined || it.tags.includes(p.tag)) &&
     (p.kind === undefined || it.kind === p.kind)
   const tabsOf = (): { tag: string; count: number }[] => {
-    const counts = new Map<string, number>()
+    const counts = new Map<string, number>([...fake.tabNames].map(tag => [tag, 0]))
     for (const it of fake.items) for (const t of it.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
     return [...counts.entries()]
       .map(([tag, count]) => ({ tag, count }))
@@ -171,6 +179,7 @@ export function createFakeApi(
       fake.tagCalls.push(params)
       if (fake.failTagWith !== null) return Promise.reject(new Error(fake.failTagWith))
       const tag = params.tag.replace(/\s+/g, ' ').trim().toLowerCase()
+      if (params.tagged) fake.tabNames.add(tag)
       let tags: string[] = []
       fake.items = fake.items.map((it) => {
         if (it.id !== params.id) return it
@@ -187,6 +196,22 @@ export function createFakeApi(
       const title = params.title?.replace(/\s+/g, ' ').trim() || null
       fake.items = fake.items.map((it) => it.id === params.id ? { ...it, title } : it)
       return settle({ title })
+    },
+    createTab: (params) => {
+      fake.createTabCalls.push(params)
+      if (fake.failTabManagement) return Promise.reject(new Error('E_STORE_IO'))
+      const tag = params.tag.replace(/\s+/g, ' ').trim().toLowerCase()
+      const created = !fake.tabNames.has(tag)
+      fake.tabNames.add(tag)
+      return settle({ tag, created })
+    },
+    removeTab: (params) => {
+      fake.removeTabCalls.push(params)
+      if (fake.failTabManagement) return Promise.reject(new Error('E_STORE_IO'))
+      const removed = fake.tabNames.delete(params.tag)
+      const untagged = fake.items.filter(item => item.tags.includes(params.tag)).length
+      fake.items = fake.items.map(item => ({ ...item, tags: item.tags.filter(tag => tag !== params.tag) }))
+      return settle({ removed, untagged })
     },
     remove: (params) => {
       fake.removeCalls.push(params.id)

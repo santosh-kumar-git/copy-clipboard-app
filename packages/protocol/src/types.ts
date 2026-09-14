@@ -141,6 +141,8 @@ export type StoreEvent =
   | { readonly kind: 'ITEM_ADDED'; readonly seq: number; readonly at: number; readonly item: Item }
   | { readonly kind: 'ITEM_UPDATED'; readonly seq: number; readonly at: number; readonly id: ItemId; readonly patch: ItemPatch }
   | { readonly kind: 'ITEM_DELETED'; readonly seq: number; readonly at: number; readonly id: ItemId; readonly reason: DeleteReason }
+  | { readonly kind: 'TAB_CREATED'; readonly seq: number; readonly at: number; readonly tag: string }
+  | { readonly kind: 'TAB_DELETED'; readonly seq: number; readonly at: number; readonly tag: string }
   | { readonly kind: 'CHECKPOINT'; readonly seq: number; readonly at: number; readonly maxSeq: number; readonly liveItemCount: number; readonly watermarks: Readonly<Record<string, number>> }
 
 export type StoreEventKind = StoreEvent['kind']

@@ -24,8 +24,8 @@ describe('recordAad', () => {
     expect(aad.length).toBe(14 + 16 + 'ITEM_ADDED'.length)
   })
 
-  it('covers all four record kinds and the anchor seq is 0', () => {
-    expect(RECORD_KINDS).toEqual(['ITEM_ADDED', 'ITEM_UPDATED', 'ITEM_DELETED', 'CHECKPOINT'])
+  it('covers item, tab and checkpoint record kinds and the anchor seq is 0', () => {
+    expect(RECORD_KINDS).toEqual(['ITEM_ADDED', 'ITEM_UPDATED', 'ITEM_DELETED', 'CHECKPOINT', 'TAB_CREATED', 'TAB_DELETED'])
     expect(ANCHOR_AAD_SEQ).toBe(0)
   })
 })

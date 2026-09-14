@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import type { ItemSummary } from '@cairn/protocol'
   import ItemRow from './ItemRow.svelte'
   import Preview from './Preview.svelte'
@@ -11,7 +12,6 @@
     SHORTCUT_HINTS,
     PaletteState,
     ROW_HEIGHT_PX,
-    TAG_PLACEHOLDER,
     filePathsFromPreview,
     hotkeyFailedText,
     sameTab,
@@ -29,7 +29,8 @@
 
   let inputEl: HTMLInputElement | null = $state(null)
   let listEl: HTMLDivElement | null = $state(null)
-  let tagEl: HTMLInputElement | null = $state(null)
+  let tagEl: HTMLDivElement | null = $state(null)
+  let newTabEl: HTMLInputElement | null = $state(null)
   let titleEl: HTMLInputElement | null = $state(null)
   let previewLayout: 'bottom' | 'right' = $state('bottom')
   let draggedItem: ItemSummary | null = $state(null)
@@ -42,8 +43,7 @@
     selected !== null && selected.kind === 'files' ? filePathsFromPreview(palette.previewText) : [],
   )
 
-  /** All, Pinned, then one per tab that has an item. Pinned is always shown even when empty: it is
-   *  the tab that promises nothing in it is ever evicted, so it has to be visible to be believed. */
+  /** Empty tabs remain available as drop targets. */
   const tabs: { tab: ActiveTab; label: string; count: number | null }[] = $derived([
     { tab: ALL_TAB, label: 'All', count: null },
     { tab: PINNED_TAB, label: 'Pinned', count: palette.pinnedCount },
@@ -65,7 +65,12 @@
   // keystroke after a tab is filed goes nowhere at all.
   $effect(() => {
     if (palette.titleEditing) titleEl?.focus()
-    else if (palette.tagging) tagEl?.focus()
+    else if (palette.tabCreating) newTabEl?.focus()
+    else if (palette.tagging) {
+      const choice = tagEl?.querySelector<HTMLButtonElement>('.tag-chip')
+      if (choice) choice.focus()
+      else tagEl?.focus()
+    }
     else inputEl?.focus()
   })
 
@@ -93,6 +98,16 @@
 
   function onKindChange(event: Event & { currentTarget: HTMLSelectElement }): void {
     palette.pending = palette.selectKind(event.currentTarget.value as KindFilter)
+    inputEl?.focus({ preventScroll: true })
+  }
+
+  function selectTab(tab: ActiveTab): void {
+    palette.pending = palette.selectTab(tab)
+    inputEl?.focus({ preventScroll: true })
+  }
+
+  function removeTab(tag: string): void {
+    palette.pending = palette.removeTab(tag)
     inputEl?.focus({ preventScroll: true })
   }
 
@@ -170,18 +185,42 @@
     }
   }
 
-  /** The tab field owns Enter and Escape while it is open, so neither reaches the list. */
   function onTagKeyDown(event: KeyboardEvent): void {
+    event.stopPropagation()
+    if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      const choices = [...(tagEl?.querySelectorAll<HTMLButtonElement>('.tag-chip') ?? [])]
+      if (choices.length === 0) return
+      event.preventDefault()
+      const current = choices.indexOf(event.target as HTMLButtonElement)
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 :
+        (current + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1) + choices.length) % choices.length
+      choices[next]?.focus()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      palette.closeTagging()
+    }
+  }
+
+  async function chooseTab(tag: string): Promise<void> {
+    const focusWasInside = tagEl?.contains(document.activeElement) === true
+    await palette.toggleTag(tag)
+    await tick()
+    if (palette.tagging && focusWasInside && document.activeElement === document.body) {
+      const choice = tagEl?.querySelector<HTMLButtonElement>('.tag-chip')
+      if (choice) choice.focus()
+      else tagEl?.focus()
+    }
+  }
+
+  function onNewTabKeyDown(event: KeyboardEvent): void {
     event.stopPropagation()
     if (event.target instanceof HTMLButtonElement && (event.key === 'Enter' || event.key === ' ')) return
     if (event.key === 'Enter') {
       event.preventDefault()
-      palette.pending = palette.commitTag()
-      return
-    }
-    if (event.key === 'Escape') {
+      palette.pending = palette.createTab()
+    } else if (event.key === 'Escape') {
       event.preventDefault()
-      palette.closeTagging()
+      palette.closeTabCreation()
     }
   }
 
@@ -251,34 +290,44 @@
   <div class="filter-bar">
   <div class="tabs" data-testid="tabs" role="group" aria-label="Tabs">
     {#each tabs as t (t.label)}
-      <button
-        type="button"
-        class="tab"
-        class:tab-active={sameTab(t.tab, palette.activeTab)}
+      <div class="tab-entry" class:tab-entry-active={sameTab(t.tab, palette.activeTab)}
         class:tab-drop-target={dropTarget !== null && sameTab(t.tab, dropTarget)}
-        aria-pressed={sameTab(t.tab, palette.activeTab)}
-        title={t.tab.kind === 'pinned' ? 'Drop a clip here to pin it' : t.tab.kind === 'tag' ? `Drop a clip here to add it to ${t.label}` : undefined}
+        role="group" aria-label={t.label}
         ondragover={(event) => dragOver(event, t.tab)}
         ondragleave={(event) => {
           if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) dropTarget = null
         }}
         ondrop={(event) => dropClip(event, t.tab)}
+      >
+      <button
+        type="button"
+        class="tab"
+        class:tab-active={sameTab(t.tab, palette.activeTab)}
+        aria-pressed={sameTab(t.tab, palette.activeTab)}
+        title={t.tab.kind === 'pinned' ? 'Drop a clip here to pin it' : t.tab.kind === 'tag' ? `Drop a clip here to add it to ${t.label}` : undefined}
         onmousedown={keepFocus}
-        onclick={() => (palette.pending = palette.selectTab(t.tab))}
+        onclick={() => selectTab(t.tab)}
       >
         {t.label}{#if t.count !== null}<span class="tab-count">{t.count}</span>{/if}
       </button>
+      {#if t.tab.kind === 'tag'}
+        <button type="button" class="tab-delete" aria-label={`Delete tab ${t.label}`}
+          title="Delete tab — keep the clips" disabled={palette.removingTab !== null}
+          onmousedown={keepFocus}
+          onclick={() => removeTab(t.label)}
+        ><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg></button>
+      {/if}
+      </div>
     {/each}
+  </div>
     <button
       type="button"
       class="tab tab-new"
       data-testid="new-tab"
-      title="File the selected copy into a tab — anything in a tab is kept, never evicted"
-      disabled={selected === null}
+      title="Create an empty tab, then drag clips into it"
       onmousedown={keepFocus}
-      onclick={() => palette.openTagging()}>+ Tab</button
+      onclick={() => palette.openTabCreation()}>+ New tab</button
     >
-  </div>
   <div class="type-filter" class:type-filter-active={palette.activeKind !== 'all'}>
     <svg class="filter-icon" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 5h18l-7 8v5l-4 2v-7Z" />
@@ -296,6 +345,23 @@
     <svg class="filter-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
   </div>
   </div>
+
+  {#if palette.tabCreating}
+    <div class="tab-editor" role="group" aria-label="Create a tab" onkeydown={onNewTabKeyDown}>
+      <label for="new-tab-name">Create a tab <span>Then drag clips onto it.</span></label>
+      <div class="tab-editor-controls">
+        <input bind:this={newTabEl} id="new-tab-name" data-testid="new-tab-input" class="tag-input"
+          type="text" aria-label="Tab name" placeholder="e.g. Work" maxlength="24" autocomplete="off"
+          spellcheck="false" value={palette.newTabDraft}
+          oninput={(event) => (palette.newTabDraft = event.currentTarget.value)} />
+        <button type="button" class="button-primary"
+          disabled={palette.newTabDraft.trim().length === 0 || palette.tabCreateSaving}
+          onclick={() => (palette.pending = palette.createTab())}>{palette.tabCreateSaving ? 'Creating…' : 'Create tab'}</button>
+        <button type="button" class="button-quiet" onclick={() => palette.closeTabCreation()}>Cancel</button>
+      </div>
+      {#if palette.tabCreateError}<div class="tab-error" role="alert">{palette.tabCreateError}</div>{/if}
+    </div>
+  {/if}
 
   {#if palette.titleEditing}
     <div class="title-editor" data-testid="title-editor">
@@ -321,9 +387,9 @@
   {/if}
 
   {#if palette.tagging}
-    <div class="tag-row" data-testid="tag-row" role="group" aria-label="Choose tabs" onkeydown={onTagKeyDown}>
+    <div bind:this={tagEl} class="tag-row" data-testid="tag-row" role="group" aria-label="Add clip to tabs" tabindex="-1" onkeydown={onTagKeyDown}>
       <div class="tag-heading">
-        <span>{palette.tabs.length > 0 ? 'Choose tabs' : 'Create your first tab'}</span>
+        <span>Add to tab <small>Checked tabs already contain this clip.</small></span>
         <button type="button" class="button-quiet" aria-label="Done tagging"
           onmousedown={keepFocus} onclick={() => palette.closeTagging()}>Done</button>
       </div>
@@ -333,29 +399,15 @@
             {@const assigned = palette.taggingTags.includes(t.tag)}
             <button type="button" class="tag-chip" class:tag-chip-active={assigned}
               aria-label={`${assigned ? 'Remove from' : 'Add to'} ${t.tag}`}
-              aria-pressed={assigned} disabled={palette.tagSaving}
+              aria-pressed={assigned} aria-disabled={palette.tagSaving}
               onmousedown={keepFocus}
-              onclick={() => (palette.pending = palette.toggleTag(t.tag))}
+              onclick={() => (palette.pending = chooseTab(t.tag))}
             >{#if assigned}<span aria-hidden="true">✓ </span>{/if}{t.tag}</button>
           {/each}
         </div>
+      {:else}
+        <div class="tag-empty">Create a tab above, then drag clips onto it.</div>
       {/if}
-      <div class="tag-create">
-      <input
-        bind:this={tagEl}
-        class="tag-input"
-        data-testid="tag-input"
-        type="text"
-        aria-label="New tab name"
-        placeholder={TAG_PLACEHOLDER}
-        autocomplete="off"
-        spellcheck="false"
-        value={palette.tagDraft}
-        oninput={(event) => (palette.tagDraft = event.currentTarget.value)}
-      />
-        <button type="button" class="button-primary" disabled={palette.tagDraft.trim().length === 0 || palette.tagSaving}
-          onmousedown={keepFocus} onclick={() => (palette.pending = palette.commitTag())}>Create tab</button>
-      </div>
     </div>
   {/if}
 
@@ -380,6 +432,12 @@
   >
     {#if palette.total === 0}
       <div class="empty" data-testid="empty">{palette.emptyText}</div>
+      {#if palette.activeTab.kind === 'tag' && palette.query === ''}
+        <div class="empty-tab-help">
+          <span>Drag clips from All onto this tab.</span>
+          <button type="button" class="button-quiet" onclick={() => selectTab(ALL_TAB)}>Show all clips</button>
+        </div>
+      {/if}
     {:else}
       <div class="spacer" data-testid="spacer" style="height: {palette.total * ROW_HEIGHT_PX}px">
         {#each palette.visibleRows as row (row.index)}

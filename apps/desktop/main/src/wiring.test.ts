@@ -8,6 +8,7 @@ import {
   fixturePath,
   ok,
   TOAST_COPIED_MANUAL,
+  IPC_REQUEST_CHANNELS,
   type AgentCapabilities,
   type Candidate,
   type ClipboardAgent,
@@ -228,7 +229,7 @@ describe('start', () => {
     expect(r).toEqual({ ok: true, value: { accelerator: 'Cmd+Shift+V', hotkeyStatus: 'active' } })
     expect(h.captureCalls).toEqual(['start'])
     expect(h.agentRequests.map((q) => q.method)).toContain('hotkey.register')
-    expect(h.registered.size).toBe(11)
+    expect([...h.registered.keys()]).toEqual([...IPC_REQUEST_CHANNELS])
   })
 
   it('tells the renderer the hotkey status', async () => {
@@ -288,7 +289,7 @@ describe('start', () => {
     await h.app.start()
 
     expect(channelsWhenDialogOpened).toContain('cairn:history.list')
-    expect(channelsWhenDialogOpened).toHaveLength(11)
+    expect(channelsWhenDialogOpened).toEqual([...IPC_REQUEST_CHANNELS])
     // Sanity: the dialog really does open after the slow startup work, so the race was real and
     // this test would have caught it rather than passing for the wrong reason.
     expect(agentStartedFirst).toBe(true)

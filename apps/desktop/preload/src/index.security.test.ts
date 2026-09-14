@@ -36,13 +36,13 @@ describe('the exposed surface', () => {
     expect(Object.keys(exposed)).toEqual(['cairn'])
   })
 
-  it('is EXACTLY these sixteen methods — no more, no fewer', async () => {
+  it('exposes exactly the named operations', async () => {
     const api = await loadPreload()
     expect(Object.keys(api).sort()).toEqual([
-      'close', 'list', 'onHistoryChanged', 'onHotkeyStatus', 'onPaletteHidden', 'onPaletteShown', 'onToast',
+      'close', 'createTab', 'removeTab', 'list', 'onHistoryChanged', 'onHotkeyStatus', 'onPaletteHidden', 'onPaletteShown', 'onToast',
       'paletteReady', 'pin', 'preview', 'remove', 'search', 'securityStatus', 'setTitle', 'tag',
     ].concat(['copy']).sort())
-    expect(Object.keys(api)).toHaveLength(16)
+    expect(Object.keys(api)).toHaveLength(18)
   })
 
   it('exposes no generic bridge into the main process', async () => {
@@ -68,6 +68,8 @@ describe('channel hard-coding', () => {
     await api['preview']!({ id: '01KDVDNA00041061050R3GG28A' })
     await api['pin']!({ id: '01KDVDNA00041061050R3GG28A', pinned: true })
     await api['tag']!({ id: '01KDVDNA00041061050R3GG28A', tag: 'work', tagged: true })
+    await api['createTab']!({ tag: 'work' })
+    await api['removeTab']!({ tag: 'work' })
     await api['setTitle']!({ id: '01KDVDNA00041061050R3GG28A', title: 'Alias' })
     await api['remove']!({ id: '01KDVDNA00041061050R3GG28A' })
     await api['copy']!({ id: '01KDVDNA00041061050R3GG28A' })
@@ -80,6 +82,8 @@ describe('channel hard-coding', () => {
       'cairn:history.preview',
       'cairn:history.pin',
       'cairn:history.tag',
+      'cairn:tabs.create',
+      'cairn:tabs.remove',
       'cairn:history.title',
       'cairn:history.remove',
       'cairn:recall.copy',
@@ -140,11 +144,11 @@ describe('the preload source itself', () => {
 
   it('never lets the page choose a channel name', () => {
     // The property that matters is that no channel reachable FROM THE PAGE is variable. Every one of
-    // the sixteen exposed methods therefore names its channel as a quoted 'cairn:…' literal at its
-    // own call site: the eleven request methods pass it straight to ipcRenderer.invoke, and the five
+    // the exposed methods therefore names its channel as a quoted 'cairn:…' literal at its
+    // own call site: the request methods pass it straight to ipcRenderer.invoke, and the five
     // event methods pass it to the local `subscribe` helper.
     const literals = [...source.matchAll(/(?:ipcRenderer\.invoke|subscribe)\(\s*('cairn:[a-z.]+')/g)]
-    expect(literals).toHaveLength(16)
+    expect(literals).toHaveLength(18)
 
     // `subscribe` is the ONLY place an identifier may stand where a channel goes, and it is a local
     // function — never exposed — so the page cannot reach it to pick one. Assert both halves: the

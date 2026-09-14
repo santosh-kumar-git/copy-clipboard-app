@@ -128,6 +128,10 @@ const HANDLERS: Record<IpcRequestChannel, Handler> = {
     const p = params as { id: string; title: string | null }
     return await deps.history.setTitle(p.id as ItemId, p.title)
   },
+  'cairn:tabs.create': async (params, deps) =>
+    await deps.history.createTab((params as { tag: string }).tag),
+  'cairn:tabs.remove': async (params, deps) =>
+    await deps.history.removeTab((params as { tag: string }).tag),
   'cairn:history.remove': async (params, deps) =>
     await deps.history.remove((params as { id: string }).id as ItemId),
   'cairn:recall.copy': async (params, deps) =>

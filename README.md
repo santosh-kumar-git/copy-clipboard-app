@@ -83,11 +83,19 @@ Press **Cmd+Shift+V** once it is up. The window is an accessory panel, so it nev
 Dock or the app switcher, and the app logs one NDJSON line per event to stdout — `hotkey.bound` at
 startup and `hotkey.fired` on each press are the two to look for.
 
+Use **New tab** to create an empty tab, then drag clips from the list onto it. The clip's
+**Add to tab** button offers existing tabs without creating one. Empty tabs created this way
+remain available after restarting.
+
+The **×** beside a tab deletes only the tab and removes its tag from clips. The clips stay in
+All, with their other tabs, pins, and copy times unchanged. Clips with no remaining tab or pin
+return to the normal “keep last N” limits on the next retention sweep.
+
 ## Install it (macOS, local)
 
 ```sh
 npm run dmg              # builds dist/Cairn.app, then dist/Cairn-<version>.dmg (~145 MB)
-open dist/Cairn-0.1.0.dmg # drag Cairn onto the Applications shortcut in the window
+open dist/Cairn-0.1.1.dmg # drag Cairn onto the Applications shortcut in the window
 ```
 
 `npm run package:mac` stops after the `.app` if you would rather drag that straight out of `dist/`.

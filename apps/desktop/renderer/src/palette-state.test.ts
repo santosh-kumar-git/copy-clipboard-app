@@ -260,9 +260,8 @@ describe('PaletteState', () => {
     const state = new PaletteState({ api: fake.api, clock: createTestClock() })
     await state.start()
     state.openTagging()
-    state.tagDraft = 'work'
     state.selectedIndex = 1
-    await state.commitTag()
+    await state.toggleTag('work')
     expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work', tagged: true }])
     state.dispose()
   })

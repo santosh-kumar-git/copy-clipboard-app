@@ -87,7 +87,6 @@ export const EMPTY_TEXT = 'Nothing copied yet'
 export const EMPTY_TAB_TEXT = 'Nothing filed under this tab yet — anything you file here is kept'
 export const EMPTY_PINNED_TEXT = 'Nothing pinned yet — pinned copies are never evicted'
 export const NO_RESULTS_TEXT = 'No matches'
-export const TAG_PLACEHOLDER = 'New tab name'
 /** Mirrors `TAGS_MAX_PER_ITEM` in `@cairn/protocol`; asserted equal by palette-state.test.ts, because
  *  the renderer cannot import that barrel at runtime (it re-exports node:crypto). */
 export const MAX_TABS_PER_ITEM = 8
@@ -268,7 +267,11 @@ export class PaletteState {
   /** The inline "file this into a tab" field. Open only while the user is typing a tab name. */
   tagging = $state(false)
   tagSaving = $state(false)
-  tagDraft = $state('')
+  tabCreating = $state(false)
+  newTabDraft = $state('')
+  tabCreateError: string | null = $state(null)
+  tabCreateSaving = $state(false)
+  removingTab: string | null = $state(null)
   titleEditing = $state(false)
   titleDraft = $state('')
   revealedItemId: string | null = $state(null)
@@ -291,6 +294,7 @@ export class PaletteState {
   #tagItemId: string | null = null
   #tagInitialTags: readonly string[] = []
   #tagEditSeq = 0
+  #tabCreateSeq = 0
   #cancelToast: Cancel | null = null
   #titleItemId: string | null = null
   #titleEditSeq = 0
@@ -390,6 +394,7 @@ export class PaletteState {
         this.activeTab = ALL_TAB
         this.activeKind = 'all'
         this.closeTagging()
+        this.closeTabCreation()
         this.closeTitleEditing()
         this.hidePreview()
         this.pending = this.reload().then(async () => {
@@ -659,18 +664,17 @@ export class PaletteState {
     await this.setQuery(this.query)
   }
 
-  /** Opens the tab-name field for the selected row. There is no separate "create a tab" step: a tab
-   *  exists because an item is in it, so typing a new name here is what creates one. */
+  /** Assigning a clip and creating a tab are separate actions. */
   openTagging(): void {
     const item = this.selectedItem
     if (item === null) return
     this.closeTitleEditing()
+    this.closeTabCreation()
     this.#tagEditSeq += 1
     this.#tagItemId = item.id
     this.#tagInitialTags = item.tags
     this.tagging = true
     this.tagSaving = false
-    this.tagDraft = ''
   }
 
   closeTagging(): void {
@@ -679,7 +683,68 @@ export class PaletteState {
     this.#tagInitialTags = []
     this.tagging = false
     this.tagSaving = false
-    this.tagDraft = ''
+  }
+
+  openTabCreation(): void {
+    this.closeTagging()
+    this.closeTitleEditing()
+    this.closeTabCreation()
+    this.tabCreating = true
+  }
+
+  closeTabCreation(): void {
+    this.#tabCreateSeq += 1
+    this.tabCreating = false
+    this.newTabDraft = ''
+    this.tabCreateError = null
+    this.tabCreateSaving = false
+  }
+
+  async createTab(): Promise<void> {
+    if (!this.tabCreating || this.tabCreateSaving) return
+    const tag = this.newTabDraft.replace(/\s+/g, ' ').trim()
+    if (tag.length === 0 || tag.length > 24) {
+      this.tabCreateError = tag.length === 0 ? 'Enter a tab name.' : 'Use 24 characters or fewer.'
+      return
+    }
+    const seq = this.#tabCreateSeq
+    this.tabCreateSaving = true
+    this.tabCreateError = null
+    try {
+      await this.#deps.api.createTab({ tag })
+    } catch (error) {
+      if (seq !== this.#tabCreateSeq) return
+      this.tabCreateSaving = false
+      this.tabCreateError = error instanceof Error && error.message === 'E_TAG_LIMIT'
+        ? 'You have reached the tab limit. Delete an unused tab first.'
+        : 'Could not create the tab. Try again.'
+      return
+    }
+    if (seq !== this.#tabCreateSeq) return
+    this.closeTabCreation()
+    await this.refresh()
+  }
+
+  async removeTab(tag: string): Promise<void> {
+    if (this.removingTab !== null) return
+    this.removingTab = tag
+    const opening = this.#openingSeq
+    try {
+      await this.#deps.api.removeTab({ tag })
+    } catch {
+      if (this.#active && opening === this.#openingSeq) {
+        this.#showToast({ text: 'Could not delete the tab. Your clips are unchanged.', tone: 'warn' })
+      }
+      return
+    } finally {
+      this.removingTab = null
+    }
+    if (!this.#active || opening !== this.#openingSeq) return
+    if (this.activeTab.kind === 'tag' && this.activeTab.tag === tag) {
+      this.activeTab = ALL_TAB
+      await this.#reloadFilter()
+    } else await this.refresh()
+    this.#showToast({ text: 'Tab deleted. Clips kept in All.', tone: 'info' }, TOAST_MS)
   }
 
   openTitleEditing(): void {
@@ -687,6 +752,7 @@ export class PaletteState {
     if (item === null) return
     this.#titleEditSeq += 1
     this.closeTagging()
+    this.closeTabCreation()
     this.#titleItemId = item.id
     this.titleDraft = item.title ?? ''
     this.titleEditing = true
@@ -737,17 +803,6 @@ export class PaletteState {
     this.previewTruncated = false
   }
 
-  async commitTag(): Promise<void> {
-    const id = this.#tagItemId
-    const draft = this.tagDraft
-    if (id === null || draft.trim().length === 0) {
-      this.closeTagging()
-      return
-    }
-    this.closeTagging()
-    await this.#applyTag(id, draft, true)
-  }
-
   async toggleTag(tag: string): Promise<void> {
     const id = this.#tagItemId
     if (id === null || this.tagSaving) return
@@ -755,13 +810,6 @@ export class PaletteState {
     this.tagSaving = true
     await this.#applyTag(id, tag, !this.taggingTags.includes(tag))
     if (seq === this.#tagEditSeq) this.tagSaving = false
-  }
-
-  /** Takes the selected item out of one tab. The chip's ✕ and nothing else calls this. */
-  async untag(tag: string): Promise<void> {
-    const id = this.#tagItemId ?? this.selectedItem?.id
-    if (id === undefined) return
-    await this.#applyTag(id, tag, false)
   }
 
   async #applyTag(id: string, tag: string, tagged: boolean): Promise<void> {
@@ -846,6 +894,7 @@ export class PaletteState {
     this.#cancelToast = null
     this.toast = null
     this.closeTagging()
+    this.closeTabCreation()
     this.closeTitleEditing()
     this.hidePreview()
     this.query = ''
@@ -860,9 +909,15 @@ export class PaletteState {
     this.statusText = null
   }
 
-  #showToast(t: ToastPayload): void {
+  #showToast(t: ToastPayload, durationMs?: number): void {
     this.#cancelToast?.()
     this.#cancelToast = null
     this.toast = t
+    if (durationMs !== undefined) {
+      this.#cancelToast = this.#deps.clock.setTimeout(() => {
+        this.toast = null
+        this.#cancelToast = null
+      }, durationMs)
+    }
   }
 }

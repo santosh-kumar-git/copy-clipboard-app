@@ -94,22 +94,30 @@ describe('appendEvent / readAll', () => {
     })
   })
 
-  it('round-trips all three caller-visible event kinds', async () => {
+  it('round-trips every caller-visible event kind', async () => {
     const { store, ids } = seeded(1)
     store.appendEvent({ kind: 'ITEM_UPDATED', id: ids[0] as ItemId, patch: { updatedAt: 42, pinned: true } })
     store.appendEvent({ kind: 'ITEM_DELETED', id: ids[0] as ItemId, reason: 'retention-count' })
+    store.appendEvent({ kind: 'TAB_CREATED', tag: 'work' })
+    store.appendEvent({ kind: 'TAB_DELETED', tag: 'work' })
     const records = await drain(store)
     expect(records.map((r) => (r.ok ? r.value.kind : 'ERR'))).toEqual([
       'CHECKPOINT',
       'ITEM_ADDED',
       'ITEM_UPDATED',
       'ITEM_DELETED',
+      'TAB_CREATED',
+      'TAB_DELETED',
     ])
     const updated = records[2]
     if (updated === undefined || !updated.ok || updated.value.kind !== 'ITEM_UPDATED') {
       throw new Error('unreachable')
     }
     expect(updated.value.patch).toEqual({ updatedAt: 42, pinned: true })
+    expect(records.slice(-2)).toEqual([
+      { ok: true, value: { kind: 'TAB_CREATED', tag: 'work', seq: 5, at: 1_767_225_600_000 } },
+      { ok: true, value: { kind: 'TAB_DELETED', tag: 'work', seq: 6, at: 1_767_225_600_000 } },
+    ])
   })
 
   it('finishes an existing replay against its original generation when compaction runs between records', async () => {

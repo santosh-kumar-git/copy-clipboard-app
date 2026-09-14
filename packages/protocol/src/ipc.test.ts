@@ -28,13 +28,15 @@ const summary = {
 }
 
 describe('the channel lists are frozen and complete', () => {
-  it('has eleven request channels and five event channels, each with a schema', () => {
+  it('has thirteen request channels and five event channels, each with a schema', () => {
     expect(IPC_REQUEST_CHANNELS).toEqual([
       'cairn:history.list',
       'cairn:history.search',
       'cairn:history.preview',
       'cairn:history.pin',
       'cairn:history.tag',
+      'cairn:tabs.create',
+      'cairn:tabs.remove',
       'cairn:history.title',
       'cairn:history.remove',
       'cairn:recall.copy',
@@ -54,7 +56,7 @@ describe('the channel lists are frozen and complete', () => {
       expect(IpcRequestSchema[c].result).toBeDefined()
     }
     for (const c of IPC_EVENT_CHANNELS) expect(IpcEventSchema[c]).toBeDefined()
-    expect(Object.keys(IpcRequestSchema)).toHaveLength(11)
+    expect(Object.keys(IpcRequestSchema)).toHaveLength(13)
     expect(Object.keys(IpcEventSchema)).toHaveLength(5)
   })
 
@@ -69,6 +71,15 @@ describe('the channel lists are frozen and complete', () => {
 })
 
 describe('inbound params are validated (main side)', () => {
+  it('validates tab management independently of any clip id', () => {
+    for (const channel of ['cairn:tabs.create', 'cairn:tabs.remove'] as const) {
+      const params = IpcRequestSchema[channel].params
+      expect(params.parse({ tag: 'work' })).toEqual({ tag: 'work' })
+      for (const tag of ['', 'x'.repeat(25), 42, null]) {
+        expect(params.safeParse({ tag }).success).toBe(false)
+      }
+    }
+  })
   it('applies the pinnedOnly default and refuses an out-of-range limit', () => {
     const params = IpcRequestSchema['cairn:history.list'].params
     expect(params.parse({ limit: 50, offset: 0 })).toEqual({ limit: 50, offset: 0, pinnedOnly: false })

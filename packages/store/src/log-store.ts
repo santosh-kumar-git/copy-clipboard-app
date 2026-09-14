@@ -25,6 +25,8 @@ export type StoreEventInput =
   | { readonly kind: 'ITEM_ADDED'; readonly item: Item }
   | { readonly kind: 'ITEM_UPDATED'; readonly id: ItemId; readonly patch: ItemPatch }
   | { readonly kind: 'ITEM_DELETED'; readonly id: ItemId; readonly reason: DeleteReason }
+  | { readonly kind: 'TAB_CREATED'; readonly tag: string }
+  | { readonly kind: 'TAB_DELETED'; readonly tag: string }
 
 /** `meta.json` — the ONLY plaintext file the store writes. No sequence data, ever. */
 export interface StoreMeta {
@@ -90,6 +92,7 @@ interface RecordPayload {
   readonly id?: ItemId
   readonly patch?: ItemPatch
   readonly reason?: DeleteReason
+  readonly tag?: string
   readonly maxSeq?: number
   readonly liveItemCount?: number
   readonly watermarks?: Readonly<Record<string, number>>
@@ -140,6 +143,12 @@ function toStoreEvent(p: RecordPayload, lineIndex: number): Result<StoreEvent> {
         return err('E_STORE_CORRUPT', `line ${lineIndex}: ITEM_DELETED needs id and reason`)
       }
       return ok({ kind: 'ITEM_DELETED', seq: p.seq, at: p.at, id: p.id, reason: p.reason })
+    case 'TAB_CREATED':
+    case 'TAB_DELETED':
+      if (typeof p.tag !== 'string' || p.tag.length === 0) {
+        return err('E_STORE_CORRUPT', `line ${lineIndex}: tab event needs a tag`)
+      }
+      return ok({ kind: p.kind, seq: p.seq, at: p.at, tag: p.tag })
     case 'CHECKPOINT':
       if (p.maxSeq === undefined || p.liveItemCount === undefined || p.watermarks === undefined) {
         return err('E_STORE_CORRUPT', `line ${lineIndex}: CHECKPOINT needs maxSeq, liveItemCount, watermarks`)
@@ -329,7 +338,9 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
           ? { item: input.item }
           : input.kind === 'ITEM_UPDATED'
             ? { id: input.id, patch: input.patch }
-            : { id: input.id, reason: input.reason }
+            : input.kind === 'ITEM_DELETED'
+              ? { id: input.id, reason: input.reason }
+              : { tag: input.tag }
       const written = sealAndAppend(input.kind, extra)
       if (!written.ok) return written
       opts.logger.debug('store.appended', { seq: written.value.seq })
@@ -352,6 +363,9 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
             id: input.id,
             reason: input.reason,
           })
+        case 'TAB_CREATED':
+        case 'TAB_DELETED':
+          return ok({ ...input, seq: written.value.seq, at: written.value.at })
       }
     },
     checkpoint(liveItemCount) {
@@ -374,6 +388,7 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
     compact(liveIds) {
       // 1. Replay the log to current state, refusing to launder a tampered one.
       const live = new Map<ItemId, Item>()
+      const explicitTabs = new Set<string>()
       const lines = readLines()
       const chain = createChainVerifier()
       for (let i = 0; i < lines.length; i++) {
@@ -397,6 +412,14 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
           const current = live.get(event.value.id)
           if (current !== undefined) live.set(event.value.id, { ...current, ...event.value.patch })
         } else if (event.value.kind === 'ITEM_DELETED') live.delete(event.value.id)
+        else if (event.value.kind === 'TAB_CREATED') explicitTabs.add(event.value.tag)
+        else if (event.value.kind === 'TAB_DELETED') {
+          const tag = event.value.tag
+          explicitTabs.delete(tag)
+          for (const item of live.values()) {
+            if (item.tags?.includes(tag)) live.set(item.id, { ...item, tags: item.tags.filter((t) => t !== tag) })
+          }
+        }
       }
 
       // A deleted id asked for by the caller stays deleted: compaction never resurrects.
@@ -438,6 +461,19 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
         out.push(line)
         tip = chainNext(tip, line)
       })
+      for (const tag of explicitTabs) {
+        const lineIndex = out.length
+        const seq = base + lineIndex
+        const line = sealRecord({
+          key: opts.key,
+          lineIndex,
+          seq,
+          kind: 'TAB_CREATED',
+          payload: encodePayload({ seq, at: opts.clock.now(), kind: 'TAB_CREATED', prev: tip, tag }),
+        })
+        out.push(line)
+        tip = chainNext(tip, line)
+      }
 
       // 3. Temp file + fsync + rename + fsync dir. A crash anywhere before the rename leaves the
       //    OLD log byte-for-byte intact.

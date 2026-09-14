@@ -7,6 +7,8 @@ export const IPC_REQUEST_CHANNELS = [
   'cairn:history.preview',
   'cairn:history.pin',
   'cairn:history.tag',
+  'cairn:tabs.create',
+  'cairn:tabs.remove',
   'cairn:history.title',
   'cairn:history.remove',
   'cairn:recall.copy',
@@ -131,6 +133,14 @@ export const IpcRequestSchema = {
   'cairn:history.title': {
     params: z.object({ id: ItemIdSchema, title: TitleSchema }),
     result: z.object({ title: TitleSchema }),
+  },
+  'cairn:tabs.create': {
+    params: z.object({ tag: z.string().min(1).max(TAG_MAX_CHARS) }),
+    result: z.object({ tag: TagSchema, created: z.boolean() }),
+  },
+  'cairn:tabs.remove': {
+    params: z.object({ tag: TagSchema }),
+    result: z.object({ removed: z.boolean(), untagged: z.int().min(0) }),
   },
   'cairn:history.remove': {
     params: z.object({ id: ItemIdSchema }),

@@ -83,14 +83,14 @@ export interface History {
   search(q: string, limit: number, filter?: SearchFilter): readonly ScoredItem[]
   resolveReps(id: ItemId): Promise<Result<readonly ResolvedRep[]>>
   pin(id: ItemId, pinned: boolean): Promise<Result<{ pinned: boolean }>>
-  /**
-   * Adds or removes one tab name on one item. Creating a tab and filling it are the same act: there
-   * is no registry to add to, so `tabs()` grows the moment the first item carries the name and
-   * shrinks again when the last one stops.
-   */
+  /** Adds or removes one tag; implicit tabs disappear when their last live item is untagged. */
   tag(id: ItemId, tag: string, tagged: boolean): Promise<Result<{ tags: readonly string[] }>>
+  /** Keeps a tab even when empty; created is false when the name already exists. */
+  createTab(rawTag: string): Promise<Result<{ tag: string; created: boolean }>>
+  /** Removes only the tag from every item, leaving retention for its next normal sweep. */
+  removeTab(rawTag: string): Promise<Result<{ removed: boolean; untagged: number }>>
   setTitle(id: ItemId, title: string | null): Promise<Result<{ title: string | null }>>
-  /** Every tab that currently has at least one live item, alphabetical, capped at TABS_MAX. */
+  /** Explicit tabs and tags on live items, alphabetical, capped at TABS_MAX. */
   tabs(): readonly Tab[]
   /** How many live items are pinned — the Pinned tab's count. */
   pinnedCount(): number
@@ -175,6 +175,7 @@ export function createHistory(deps: HistoryDeps): History {
   const { store, privacy, search, clock, logger } = deps
   let limits = deps.retention ?? DEFAULT_RETENTION
   const items = new Map<ItemId, Item>()
+  const explicitTabs = new Set<string>()
   /** itemId -> the store `seq` of its ITEM_ADDED record. Restart-identical, unlike a random id. */
   const ord = new Map<ItemId, number>()
   const byHash = new Map<ContentHash, ItemId>()
@@ -213,6 +214,15 @@ export function createHistory(deps: HistoryDeps): History {
     if (it !== undefined && byHash.get(it.contentHash) === id) byHash.delete(it.contentHash)
   }
   const isLive = (it: Item, nowMs: number): boolean => it.expiresAt === null || nowMs < it.expiresAt
+  const tabCounts = (): Map<string, number> => {
+    const counts = new Map<string, number>([...explicitTabs].map((tag) => [tag, 0]))
+    const now = clock.now()
+    for (const it of items.values()) {
+      if (!isLive(it, now)) continue
+      for (const tag of it.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+    return counts
+  }
   // Old records predate tags and titles.
   const withDefaults = (it: Item): Item => ({
     ...it, tags: Array.isArray(it.tags) ? it.tags : [], title: it.title ?? null,
@@ -240,6 +250,7 @@ export function createHistory(deps: HistoryDeps): History {
   const replay = async (): Promise<Result<{ items: number }>> => {
     const startedAtEpoch = evictionEpoch
     const restored = new Map<ItemId, Item>()
+    const restoredTabs = new Set<string>()
     const restoredOrd = new Map<ItemId, number>()
     const restoredDeletes = new Set<BlobId>()
     for await (const rec of store.readAll()) {
@@ -256,11 +267,20 @@ export function createHistory(deps: HistoryDeps): History {
         if (removed !== undefined) for (const id of blobIds(removed)) restoredDeletes.add(id)
         restored.delete(ev.id)
         restoredOrd.delete(ev.id)
+      } else if (ev.kind === 'TAB_CREATED') {
+        restoredTabs.add(ev.tag)
+      } else if (ev.kind === 'TAB_DELETED') {
+        restoredTabs.delete(ev.tag)
+        for (const it of restored.values()) {
+          if (it.tags.includes(ev.tag)) restored.set(it.id, { ...it, tags: it.tags.filter((tag) => tag !== ev.tag) })
+        }
       }
     }
     // Publish one complete snapshot; an eviction during replay must remain effective.
     previewsLoaded = evictionEpoch === startedAtEpoch
     items.clear()
+    explicitTabs.clear()
+    for (const tag of restoredTabs) explicitTabs.add(tag)
     ord.clear()
     byHash.clear()
     search.clear()
@@ -494,6 +514,45 @@ export function createHistory(deps: HistoryDeps): History {
       return ok({ tags: applied.tags })
     },
 
+    async createTab(rawTag) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
+      const tag = normalizeTag(rawTag)
+      if (tag === '') return err('E_TAG_INVALID', 'a tab name cannot be empty')
+      if (explicitTabs.has(tag)) return ok({ tag, created: false })
+      const counts = tabCounts()
+      const existed = counts.has(tag)
+      if (!existed && counts.size >= TABS_MAX) return err('E_TAG_LIMIT', `already have ${TABS_MAX} tabs`)
+      const appended = store.appendEvent({ kind: 'TAB_CREATED', tag })
+      if (!appended.ok) return appended
+      explicitTabs.add(tag)
+      emit('update')
+      return ok({ tag, created: !existed })
+    },
+
+    async removeTab(rawTag) {
+      while (loading !== null) {
+        const loaded = await loading
+        if (!loaded.ok) return loaded
+      }
+      const tag = normalizeTag(rawTag)
+      if (tag === '') return err('E_TAG_INVALID', 'a tab name cannot be empty')
+      const affected = [...items.values()].filter((it) => it.tags.includes(tag))
+      if (!explicitTabs.has(tag) && affected.length === 0) return ok({ removed: false, untagged: 0 })
+      const appended = store.appendEvent({ kind: 'TAB_DELETED', tag })
+      if (!appended.ok) return appended
+      explicitTabs.delete(tag)
+      for (const it of affected) {
+        const next = { ...it, tags: it.tags.filter((t) => t !== tag) }
+        remember(next)
+        reindex(next)
+      }
+      emit('update')
+      return ok({ removed: true, untagged: affected.length })
+    },
+
     async setTitle(id, rawTitle) {
       while (loading !== null) {
         const loaded = await loading
@@ -517,13 +576,7 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     tabs() {
-      const now = clock.now()
-      const counts = new Map<string, number>()
-      for (const it of items.values()) {
-        if (!isLive(it, now)) continue
-        for (const t of it.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
-      }
-      return [...counts.entries()]
+      return [...tabCounts().entries()]
         .map(([tag, count]) => ({ tag, count }))
         .sort((a, b) => (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0))
         .slice(0, TABS_MAX)

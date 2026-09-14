@@ -6,6 +6,8 @@ export const RECORD_KINDS = [
   'ITEM_UPDATED',
   'ITEM_DELETED',
   'CHECKPOINT',
+  'TAB_CREATED',
+  'TAB_DELETED',
 ] as const satisfies readonly StoreEventKind[]
 
 export const NONCE_BYTES = 12
@@ -60,7 +62,7 @@ export function openRecord(args: {
 
 /**
  * The reader cannot know a record's kind before opening it, and the kind is in the AAD, so it
- * tries all four (microseconds each). This is not a hole: forging a GCM tag under a different AAD
+ * tries each supported kind. This is not a hole: forging a GCM tag under a different AAD
  * is what is infeasible, and `log-store` additionally cross-checks the opened payload's own `kind`
  * against the kind it opened under.
  */
