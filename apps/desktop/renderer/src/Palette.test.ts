@@ -16,6 +16,15 @@ let host: HTMLDivElement
 let app: Record<string, unknown> | null = null
 
 beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.open = true },
+  })
+  Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.open = false },
+  })
+  hitTarget(null)
   host = document.createElement('div')
   document.body.appendChild(host)
 })
@@ -54,24 +63,98 @@ async function render(fake: FakeApi, clock = createTestClock()): Promise<Palette
   return state
 }
 
-function clipTransfer() {
-  const data = new Map<string, string>()
-  return {
-    effectAllowed: 'none',
-    dropEffect: 'none',
-    setData: (type: string, value: string) => { data.set(type, value) },
-    getData: (type: string) => data.get(type) ?? '',
-    get types() { return [...data.keys()] },
-  }
-}
-
-function drag(element: Element, type: string, transfer: ReturnType<typeof clipTransfer>): Event {
-  const event = new Event(type, { bubbles: true, cancelable: true })
-  Object.defineProperty(event, 'dataTransfer', { value: transfer })
+function pointer(element: EventTarget, type: string, x: number, y: number, pointerId = 1, buttons = type === 'pointerup' ? 0 : 1): Event {
+  const event = new MouseEvent(type, { clientX: x, clientY: y, button: 0, buttons, bubbles: true, cancelable: true })
+  Object.defineProperties(event, { pointerId: { value: pointerId }, isPrimary: { value: true } })
   element.dispatchEvent(event)
   flushSync()
   return event
 }
+
+function hitTarget(element: Element | null): void {
+  Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => element })
+}
+
+describe('mouse gestures and tab deletion confirmation', () => {
+  it('assigns a clip using mouse movement and release without a native drag payload', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)], tabs: ['work'] })
+    const state = await render(fake)
+    const source = rows()[1]!
+    const target = host.querySelector('[aria-label="Delete tab work"]')!
+    pointer(source, 'pointerdown', 30, 200)
+    hitTarget(target.querySelector('path'))
+    pointer(window, 'pointermove', 180, 140)
+    expect(target.closest('.tab-entry')?.classList.contains('tab-drop-target')).toBe(true)
+    pointer(window, 'pointerup', 180, 140)
+    source.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await state.pending
+    flushSync()
+    expect(fake.items[1]?.tags).toEqual(['work'])
+    expect(state.tabs).toEqual([{ tag: 'work', count: 1 }])
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.removeTabCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    expect(state.activeTab).toEqual({ kind: 'all' })
+    state.dispose()
+  })
+
+  it('asks before removing a tab and lets Cancel keep its clips assigned', async () => {
+    const fake = createFakeApi({ items: [makeItem(0, { tags: ['work'] })] })
+    const state = await render(fake)
+    host.querySelector<HTMLButtonElement>('[aria-label="Delete tab work"]')!.click()
+    flushSync()
+    const dialog = host.querySelector('[role="alertdialog"]')
+    expect(dialog).not.toBeNull()
+    expect(fake.removeTabCalls).toEqual([])
+    expect(dialog?.textContent).toContain('clips')
+    const cancel = dialog!.querySelector<HTMLButtonElement>('[data-testid="cancel-tab-delete"]')!
+    expect(document.activeElement).toBe(cancel)
+    cancel.click()
+    flushSync()
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(fake.items[0]?.tags).toEqual(['work'])
+    expect(fake.removeTabCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it('cancels the confirmation on Escape or reopening without closing or deleting', async () => {
+    const fake = createFakeApi({ items: [makeItem(0, { tags: ['work'] })] })
+    const state = await render(fake)
+    const remove = host.querySelector<HTMLButtonElement>('[aria-label="Delete tab work"]')!
+    remove.click()
+    flushSync()
+    pressFocused('Escape')
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(document.activeElement).toBe(host.querySelector('.search'))
+    remove.click()
+    flushSync()
+    fake.emitPaletteShown({ shownAt: 12345 })
+    await state.pending
+    flushSync()
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(fake.removeTabCalls).toEqual([])
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it('keeps the tab and assignments if a confirmed deletion fails', async () => {
+    const fake = createFakeApi({ items: [makeItem(0, { tags: ['work'] })] })
+    fake.failTabManagement = true
+    const state = await render(fake)
+    host.querySelector<HTMLButtonElement>('[aria-label="Delete tab work"]')!.click()
+    flushSync()
+    host.querySelector<HTMLButtonElement>('[data-testid="confirm-tab-delete"]')!.click()
+    await state.pending
+    flushSync()
+    expect(host.querySelector('[aria-label="Delete tab work"]')).not.toBeNull()
+    expect(fake.items[0]?.tags).toEqual(['work'])
+    expect(state.toast?.text).toContain('Could not delete')
+    expect(fake.removeCalls).toEqual([])
+    state.dispose()
+  })
+})
 
 describe('dragging clips into tabs', () => {
   it('tags the dragged clip without copying, closing, or changing the current tab', async () => {
@@ -81,14 +164,13 @@ describe('dragging clips into tabs', () => {
     const state = await render(fake)
     const source = rows()[1]!
     const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('work'))!
-    const transfer = clipTransfer()
-    expect(source.draggable).toBe(true)
-    drag(source, 'dragstart', transfer)
-    expect(transfer.types).toEqual(['application/x-cairn-item-id'])
-    expect(transfer.getData(transfer.types[0]!)).toBe(second.id)
-    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(true)
+    pointer(source.querySelector('.drag-handle')!, 'pointerdown', 30, 220)
+    hitTarget(target)
+    pointer(window, 'pointermove', 160, 140)
     expect(target.closest('.tab-entry')?.classList.contains('tab-drop-target')).toBe(true)
-    drag(target, 'drop', transfer)
+    expect(host.querySelector('.drag-status')?.textContent).toContain('Release to add to work')
+    expect(host.querySelector('.drag-status')?.textContent).not.toContain('synthetic private content')
+    pointer(window, 'pointerup', 160, 140)
     await state.pending
     flushSync()
     expect(fake.tagCalls).toEqual([{ id: second.id, tag: 'work', tagged: true }])
@@ -104,9 +186,10 @@ describe('dragging clips into tabs', () => {
     const fake = createFakeApi({ items: [makeItem(0), item] })
     const state = await render(fake)
     const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('Pinned'))!
-    const transfer = clipTransfer()
-    drag(rows()[1]!, 'dragstart', transfer)
-    drag(target, 'drop', transfer)
+    pointer(rows()[1]!, 'pointerdown', 30, 220)
+    hitTarget(target)
+    pointer(window, 'pointermove', 110, 140)
+    pointer(window, 'pointerup', 110, 140)
     await state.pending
     expect(fake.pinCalls).toEqual([{ id: item.id, pinned: true }])
     expect(fake.copyCalls).toEqual([])
@@ -117,32 +200,167 @@ describe('dragging clips into tabs', () => {
     const fake = createFakeApi({ items: [makeItem(0, { flags: ['secret'] })] })
     const state = await render(fake)
     const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('Pinned'))!
-    const transfer = clipTransfer()
-    transfer.setData('application/x-cairn-item-id', testItemId(0))
-    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(false)
-    drag(target, 'drop', transfer)
+    hitTarget(target)
+    pointer(window, 'pointermove', 110, 140)
+    pointer(window, 'pointerup', 110, 140)
     expect(fake.pinCalls).toEqual([])
-    drag(rows()[0]!, 'dragstart', transfer)
-    drag(target, 'drop', transfer)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    pointer(window, 'pointermove', 110, 140)
+    pointer(window, 'pointerup', 110, 140)
     await state.pending
     expect(fake.pinCalls).toEqual([])
     expect(state.toast?.text).toContain('Secret')
-    drag(rows()[0]!, 'dragstart', transfer)
-    drag(rows()[0]!, 'dragend', transfer)
-    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(false)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    pointer(window, 'pointermove', 110, 140)
+    pointer(window, 'pointercancel', 110, 140)
+    pointer(window, 'pointerup', 110, 140)
+    expect(host.querySelector('.tab-drop-target')).toBeNull()
+    expect(fake.pinCalls).toEqual([])
   })
 
   it('does not treat All as a drop target', async () => {
     const fake = createFakeApi({ items: [makeItem(0)] })
     await render(fake)
-    const transfer = clipTransfer()
-    drag(rows()[0]!, 'dragstart', transfer)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
     const target = host.querySelector('.tab')!
-    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(false)
-    drag(target, 'drop', transfer)
+    hitTarget(target)
+    pointer(window, 'pointermove', 30, 140)
+    expect(host.querySelector('.tab-drop-target')).toBeNull()
+    pointer(window, 'pointerup', 30, 140)
     expect(fake.tagCalls).toEqual([])
     expect(fake.pinCalls).toEqual([])
     expect(fake.copyCalls).toEqual([])
+  })
+
+  it.each(['Escape', 'pointercancel', 'blur', 'lostpointercapture'])('cancels with %s without copying or tagging', async (reason) => {
+    const fake = createFakeApi({ items: [makeItem(0)], tabs: ['work'] })
+    const state = await render(fake)
+    const source = rows()[0]!
+    pointer(source, 'pointerdown', 30, 220)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    if (reason === 'Escape') press('Escape')
+    else if (reason === 'blur') window.dispatchEvent(new Event('blur'))
+    else pointer(reason === 'lostpointercapture' ? host.querySelector('.palette')! : window, reason, 160, 140)
+    flushSync()
+    pointer(window, 'pointerup', 160, 140)
+    source.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await state.pending
+    expect(fake.items[0]?.tags).toEqual([])
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    expect(host.querySelector('.tab-drop-target')).toBeNull()
+    expect(host.querySelector('.drag-status')).toBeNull()
+    state.dispose()
+  })
+
+  it('keeps normal row clicks working below the movement threshold', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    const state = await render(fake)
+    const source = rows()[0]!
+    pointer(source, 'pointerdown', 30, 220)
+    pointer(window, 'pointermove', 33, 222)
+    pointer(window, 'pointerup', 33, 222)
+    source.click()
+    await state.pending
+    expect(fake.copyCalls).toEqual([testItemId(0)])
+    expect(fake.tagCalls).toEqual([])
+    state.dispose()
+  })
+
+  it('cancels a stale drag when the mouse is no longer held', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)], tabs: ['work'] })
+    const state = await render(fake)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    pointer(window, 'pointermove', 160, 140, 1, 0)
+    expect(host.querySelector('.drag-status')).toBeNull()
+    pointer(window, 'pointerup', 160, 140)
+    expect(fake.tagCalls).toEqual([])
+    state.dispose()
+  })
+
+  it('clears an unfinished gesture when a new press starts elsewhere', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)], tabs: ['work'] })
+    const state = await render(fake)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    pointer(host.querySelector('.search')!, 'pointerdown', 30, 80)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    pointer(window, 'pointerup', 160, 140)
+    expect(fake.tagCalls).toEqual([])
+    state.dispose()
+  })
+
+  it('does not swallow a keyboard button activation after cancelling a drag', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)], tabs: ['work'] })
+    const state = await render(fake)
+    const remove = host.querySelector<HTMLButtonElement>('[aria-label="Delete tab work"]')!
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    hitTarget(remove)
+    pointer(window, 'pointermove', 160, 140)
+    press('Escape')
+    remove.focus()
+    remove.click()
+    flushSync()
+    expect(host.querySelector('[role="alertdialog"]')).not.toBeNull()
+    expect(fake.tagCalls).toEqual([])
+    expect(fake.removeTabCalls).toEqual([])
+    state.dispose()
+  })
+
+  it('drops into the tab under the release point and cancels releases outside tabs', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)], tabs: ['work', 'home'] })
+    const state = await render(fake)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    hitTarget(host.querySelector('[aria-label="Delete tab home"]'))
+    pointer(window, 'pointerup', 240, 140)
+    await state.pending
+    expect(fake.items[0]?.tags).toEqual(['home'])
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    hitTarget(null)
+    pointer(window, 'pointerup', -10, -10)
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'home', tagged: true }])
+    state.dispose()
+  })
+
+  it('does not start dragging from row action buttons', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)], tabs: ['work'] })
+    const state = await render(fake)
+    pointer(rows()[0]!.querySelector('.row-view')!, 'pointerdown', 30, 220)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    pointer(window, 'pointerup', 160, 140)
+    expect(fake.tagCalls).toEqual([])
+    expect(host.querySelector('.drag-status')).toBeNull()
+    state.dispose()
+  })
+
+  it('keeps the dragged clip identity when a scrolled list changes during the gesture', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 120 }, (_, i) => makeItem(i)), tabs: ['work'] })
+    const state = await render(fake)
+    state.setScrollTop(60 * ROW_HEIGHT_PX)
+    await state.pending
+    flushSync()
+    const source = rows()[2]!
+    const id = source.id.replace('cairn-row-', '')
+    pointer(source, 'pointerdown', 30, 220)
+    hitTarget(host.querySelector('[aria-label="Delete tab work"]'))
+    pointer(window, 'pointermove', 160, 140)
+    state.setScrollTop(70 * ROW_HEIGHT_PX)
+    await state.pending
+    flushSync()
+    pointer(window, 'pointerup', 160, 140)
+    await state.pending
+    expect(fake.tagCalls).toEqual([{ id, tag: 'work', tagged: true }])
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
   })
 })
 
@@ -768,17 +986,15 @@ describe('the props shape', () => {
       ontag: true,
       ontitle: true,
       ondelete: true,
-      ondragstart: true,
-      ondragend: true,
+      onpointerdown: true,
     }
     expect(Object.keys(propKeys).sort()).toEqual([
       'item',
       'nowMs',
       'ondelete',
-      'ondragend',
-      'ondragstart',
       'onpick',
       'onpin',
+      'onpointerdown',
       'ontag',
       'ontitle',
       'onview',
@@ -911,6 +1127,9 @@ describe('tabs', () => {
     expect(remove).not.toBeNull()
     remove.focus()
     remove.click()
+    flushSync()
+    expect(fake.removeTabCalls).toEqual([])
+    host.querySelector<HTMLButtonElement>('[data-testid="confirm-tab-delete"]')!.click()
     await state.pending
     flushSync()
     expect(fake.removeTabCalls).toEqual([{ tag: 'work' }])
@@ -1095,9 +1314,10 @@ describe('tabs', () => {
     expect(fake.tagCalls).toEqual([])
     expect(state.tabs).toEqual([{ tag: 'work notes', count: 0 }])
     const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('work notes'))!
-    const transfer = clipTransfer()
-    drag(rows()[0]!, 'dragstart', transfer)
-    drag(target, 'drop', transfer)
+    pointer(rows()[0]!, 'pointerdown', 30, 220)
+    hitTarget(target)
+    pointer(window, 'pointermove', 160, 140)
+    pointer(window, 'pointerup', 160, 140)
     await state.pending
     flushSync()
     expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work notes', tagged: true }])

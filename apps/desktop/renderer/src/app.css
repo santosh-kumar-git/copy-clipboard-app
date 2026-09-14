@@ -133,8 +133,17 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .spacer { position: relative; }
 .row { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; white-space: nowrap; overflow: hidden; }
 .row:hover { background: var(--cairn-surface); }
-.row[draggable="true"] { cursor: grab; }
-.row[draggable="true"]:active { cursor: grabbing; }
+.row { cursor: grab; user-select: none; }
+.clip-dragging, .clip-dragging * { cursor: grabbing; }
+.drag-status { position: fixed; bottom: 52px; left: 50%; z-index: 3; transform: translateX(-50%); max-width: calc(100% - 40px); padding: 8px 14px; border: 1px solid var(--cairn-accent); border-radius: 8px; background: #303d37; color: var(--cairn-fg); pointer-events: none; font-size: 12px; }
+.tab-delete-dialog { width: min(420px, calc(100% - 40px)); padding: 22px; border: 1px solid rgb(222 240 232 / 20%); border-radius: 14px; background: var(--cairn-bg-opaque); color: var(--cairn-fg); box-shadow: 0 16px 50px rgb(0 0 0 / 40%); }
+.tab-delete-dialog::backdrop { background: rgb(0 0 0 / 48%); }
+.tab-delete-dialog h2 { margin: 0 0 10px; font-size: 17px; overflow-wrap: anywhere; }
+.tab-delete-dialog p { margin: 0; color: var(--cairn-dim); line-height: 1.6; }
+.tab-delete-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.tab-delete-actions button { padding: 7px 13px; border-radius: 7px; }
+.button-danger { border: 1px solid rgb(255 178 167 / 35%); background: rgb(255 178 167 / 10%); color: #ffb2a7; }
+.button-danger:hover { background: rgb(255 178 167 / 18%); }
 .drag-handle { display: flex; flex: none; width: 10px; color: var(--cairn-dim); opacity: .45; }
 .drag-handle svg { width: 10px; height: 16px; fill: currentColor; }
 .row:hover .drag-handle { opacity: 1; }

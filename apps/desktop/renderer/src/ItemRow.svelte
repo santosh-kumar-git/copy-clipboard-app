@@ -21,10 +21,9 @@
     ontag: () => void
     ontitle: () => void
     ondelete: () => void
-    ondragstart?: (event: DragEvent) => void
-    ondragend?: () => void
+    onpointerdown?: (event: PointerEvent) => void
   }
-  let { item, selected, ranges, top, nowMs, onpick, onview, onpin, ontag, ontitle, ondelete, ondragstart, ondragend }: Props = $props()
+  let { item, selected, ranges, top, nowMs, onpick, onview, onpin, ontag, ontitle, ondelete, onpointerdown }: Props = $props()
 
   const label = $derived(item.title ?? item.preview)
   const segments = $derived(highlightSegments(label, ranges))
@@ -52,9 +51,9 @@
   class:selected
   role="option"
   aria-selected={selected}
-  draggable={ondragstart !== undefined}
-  {ondragstart}
-  {ondragend}
+  draggable="false"
+  {onpointerdown}
+  ondragstart={(event) => event.preventDefault()}
   style="top: {top}px; height: {ROW_HEIGHT_PX}px"
   onclick={onpick}
 >

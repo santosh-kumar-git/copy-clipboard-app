@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte'
+  import { tick, untrack } from 'svelte'
   import type { ItemSummary } from '@cairn/protocol'
   import ItemRow from './ItemRow.svelte'
   import Preview from './Preview.svelte'
@@ -28,6 +28,7 @@
   let { palette }: Props = $props()
 
   let inputEl: HTMLInputElement | null = $state(null)
+  let paletteEl: HTMLDivElement | null = $state(null)
   let listEl: HTMLDivElement | null = $state(null)
   let tagEl: HTMLDivElement | null = $state(null)
   let newTabEl: HTMLInputElement | null = $state(null)
@@ -35,7 +36,11 @@
   let previewLayout: 'bottom' | 'right' = $state('bottom')
   let draggedItem: ItemSummary | null = $state(null)
   let dropTarget: ActiveTab | null = $state(null)
-  const clipDragType = 'application/x-cairn-item-id'
+  let pointerDrag: { id: number; item: ItemSummary; x: number; y: number; started: boolean } | null = null
+  let suppressDragClick = false
+  let deleteTabName: string | null = $state(null)
+  let deleteDialog: HTMLDialogElement | null = $state(null)
+  let cancelDeleteEl: HTMLButtonElement | null = $state(null)
 
   const selected = $derived(palette.selectedItem)
   const activeId = $derived(selected === null ? null : `cairn-row-${selected.id}`)
@@ -57,9 +62,21 @@
   // The palette is re-shown without being re-created, so focus follows `shownAt`, not mount.
   $effect(() => {
     void palette.shownAt
-    endDrag()
-    inputEl?.focus()
+    untrack(() => {
+      endDrag()
+      deleteTabName = null
+      inputEl?.focus()
+    })
   })
+
+  $effect(() => {
+    if (deleteTabName !== null && deleteDialog !== null) {
+      deleteDialog.showModal()
+      cancelDeleteEl?.focus()
+    }
+  })
+
+  $effect(() => () => endDrag())
 
   // Opening the tab field moves focus into it, and closing it hands focus back — otherwise the next
   // keystroke after a tab is filed goes nowhere at all.
@@ -106,44 +123,86 @@
     inputEl?.focus({ preventScroll: true })
   }
 
-  function removeTab(tag: string): void {
-    palette.pending = palette.removeTab(tag)
+  function requestTabRemoval(tag: string): void {
+    endDrag()
+    palette.closeTagging()
+    palette.closeTitleEditing()
+    palette.closeTabCreation()
+    deleteTabName = tag
+  }
+
+  function cancelTabRemoval(): void {
+    deleteDialog?.close()
+    deleteTabName = null
     inputEl?.focus({ preventScroll: true })
   }
 
-  function startDrag(event: DragEvent, item: ItemSummary): void {
-    if (event.dataTransfer === null || (event.target instanceof Element && event.target.closest('button'))) {
-      event.preventDefault()
-      return
-    }
-    draggedItem = item
-    event.dataTransfer.setData(clipDragType, item.id)
-    event.dataTransfer.effectAllowed = 'copy'
+  function confirmTabRemoval(): void {
+    const tag = deleteTabName
+    cancelTabRemoval()
+    if (tag !== null) palette.pending = palette.removeTab(tag)
+  }
+
+  function startDrag(event: PointerEvent, item: ItemSummary): void {
+    if (event.button !== 0 || event.isPrimary === false || deleteTabName !== null ||
+      (event.target instanceof Element && event.target.closest('button'))) return
+    event.preventDefault()
+    pointerDrag = { id: event.pointerId, item, x: event.clientX, y: event.clientY, started: false }
   }
 
   function endDrag(): void {
+    const id = pointerDrag?.id
+    pointerDrag = null
     draggedItem = null
     dropTarget = null
+    if (id !== undefined && paletteEl?.hasPointerCapture?.(id)) paletteEl.releasePointerCapture(id)
   }
 
-  function dragOver(event: DragEvent, tab: ActiveTab): void {
-    if (draggedItem === null || tab.kind === 'all') return
-    event.preventDefault()
-    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'
-    dropTarget = tab
+  function tabAtPoint(event: PointerEvent): ActiveTab | null {
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-drop-kind]')
+    if (target?.dataset.dropKind === 'pinned') return PINNED_TAB
+    const tag = target?.dataset.dropTag
+    return target?.dataset.dropKind === 'tag' && tag !== undefined && palette.tabs.some(t => t.tag === tag)
+      ? { kind: 'tag', tag } : null
   }
 
-  function dropClip(event: DragEvent, tab: ActiveTab): void {
-    const item = draggedItem
-    if (item === null || tab.kind === 'all' || event.dataTransfer?.getData(clipDragType) !== item.id) return
+  function moveDrag(event: PointerEvent): void {
+    const drag = pointerDrag
+    if (drag === null || drag.id !== event.pointerId) return
+    if ((event.buttons & 1) === 0) { endDrag(); return }
+    if (!drag.started) {
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return
+      drag.started = true
+      draggedItem = drag.item
+      suppressDragClick = true
+      paletteEl?.setPointerCapture?.(event.pointerId)
+    }
     event.preventDefault()
+    dropTarget = tabAtPoint(event)
+  }
+
+  function dropClip(event: PointerEvent): void {
+    const drag = pointerDrag
+    if (drag === null || drag.id !== event.pointerId) return
+    const target = drag.started ? tabAtPoint(event) : null
+    if (drag.started) event.preventDefault()
     endDrag()
-    palette.pending = palette.fileItem(item, tab)
+    if (target !== null) palette.pending = palette.fileItem(drag.item, target)
     inputEl?.focus({ preventScroll: true })
+  }
+
+  function cancelDrag(event: PointerEvent): void {
+    if (pointerDrag?.id === event.pointerId) endDrag()
   }
 
   function onKeyDown(event: KeyboardEvent): void {
     const key = event.key
+    if (deleteTabName !== null) return
+    if (draggedItem !== null) {
+      event.preventDefault()
+      if (key === 'Escape') endDrag()
+      return
+    }
     if (event.target instanceof HTMLSelectElement && key !== 'Escape') return
     if (event.target instanceof HTMLButtonElement && (key === 'Enter' || key === ' ')) return
     if (key === 'Escape') {
@@ -236,8 +295,24 @@
   }
 </script>
 
+<svelte:window onpointermove={moveDrag} onpointerup={dropClip} onpointercancel={cancelDrag}
+  onblur={() => { endDrag(); deleteTabName = null }} />
+
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="palette" onkeydown={onKeyDown} role="none">
+<div class="palette" class:clip-dragging={draggedItem !== null} bind:this={paletteEl}
+  onkeydown={onKeyDown} role="none"
+  onpointerdowncapture={(event) => {
+    if (event.isPrimary === false) return
+    endDrag()
+    suppressDragClick = false
+  }}
+  onlostpointercapture={cancelDrag}
+  onclickcapture={(event) => {
+    if (!suppressDragClick || event.detail === 0) return
+    suppressDragClick = false
+    event.preventDefault()
+    event.stopPropagation()
+  }}>
   <div class="palette-header">
     <div class="brand">
       <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -293,11 +368,7 @@
       <div class="tab-entry" class:tab-entry-active={sameTab(t.tab, palette.activeTab)}
         class:tab-drop-target={dropTarget !== null && sameTab(t.tab, dropTarget)}
         role="group" aria-label={t.label}
-        ondragover={(event) => dragOver(event, t.tab)}
-        ondragleave={(event) => {
-          if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) dropTarget = null
-        }}
-        ondrop={(event) => dropClip(event, t.tab)}
+        data-drop-kind={t.tab.kind} data-drop-tag={t.tab.kind === 'tag' ? t.tab.tag : undefined}
       >
       <button
         type="button"
@@ -314,7 +385,7 @@
         <button type="button" class="tab-delete" aria-label={`Delete tab ${t.label}`}
           title="Delete tab — keep the clips" disabled={palette.removingTab !== null}
           onmousedown={keepFocus}
-          onclick={() => removeTab(t.label)}
+          onclick={() => requestTabRemoval(t.label)}
         ><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg></button>
       {/if}
       </div>
@@ -345,6 +416,13 @@
     <svg class="filter-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
   </div>
   </div>
+
+  {#if draggedItem !== null}
+    <div class="drag-status" role="status">
+      {dropTarget?.kind === 'tag' ? `Release to add to ${dropTarget.tag}` :
+        dropTarget?.kind === 'pinned' ? 'Release to pin this clip' : 'Drag onto a tab above · Esc to cancel'}
+    </div>
+  {/if}
 
   {#if palette.tabCreating}
     <div class="tab-editor" role="group" aria-label="Create a tab" onkeydown={onNewTabKeyDown}>
@@ -448,8 +526,7 @@
               top={row.top}
               nowMs={palette.nowMs}
               selected={row.index === palette.selectedIndex}
-              ondragstart={(event) => { if (row.item !== null) startDrag(event, row.item) }}
-              ondragend={endDrag}
+              onpointerdown={(event) => { if (row.item !== null) startDrag(event, row.item) }}
               onpick={() => {
                 if (draggedItem !== null) return
                 palette.hidePreview()
@@ -546,5 +623,24 @@
 
   {#if palette.toast !== null}
     <Toast text={palette.toast.text} tone={palette.toast.tone} />
+  {/if}
+
+  {#if deleteTabName !== null}
+    <dialog bind:this={deleteDialog} class="tab-delete-dialog" role="alertdialog"
+      aria-labelledby="tab-delete-title" aria-describedby="tab-delete-description"
+      oncancel={(event) => { event.preventDefault(); cancelTabRemoval() }}
+      onkeydown={(event) => {
+        event.stopPropagation()
+        if (event.key === 'Escape') { event.preventDefault(); cancelTabRemoval() }
+      }}>
+      <h2 id="tab-delete-title">Delete “{deleteTabName}”?</h2>
+      <p id="tab-delete-description">This removes the tab and its tag from all clips. Your clips stay in All. Unpinned clips without other tags follow your normal history limit.</p>
+      <div class="tab-delete-actions">
+        <button bind:this={cancelDeleteEl} type="button" class="button-quiet"
+          data-testid="cancel-tab-delete" onclick={cancelTabRemoval}>Cancel</button>
+        <button type="button" class="button-danger" data-testid="confirm-tab-delete"
+          onclick={confirmTabRemoval}>Delete tab</button>
+      </div>
+    </dialog>
   {/if}
 </div>
