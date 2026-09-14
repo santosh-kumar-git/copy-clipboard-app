@@ -263,6 +263,7 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
 
   async function* readAll(): AsyncIterable<Result<StoreEvent>> {
     const lines = readLines()
+    const replayAnchorSeq = anchorSeq
     const chain = createChainVerifier()
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
@@ -270,7 +271,7 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
       const opened = openRecordAnyKind({
         key: opts.key,
         lineIndex: i,
-        seq: i === 0 ? ANCHOR_AAD_SEQ : anchorSeq + i,
+        seq: i === 0 ? ANCHOR_AAD_SEQ : replayAnchorSeq + i,
         line,
       })
       if (!opened.ok) {
@@ -289,8 +290,8 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
         )
         return
       }
-      if (payload.value.seq !== anchorSeq + i) {
-        yield err('E_STORE_CORRUPT', `line ${i}: seq ${payload.value.seq} != expected ${anchorSeq + i}`)
+      if (payload.value.seq !== replayAnchorSeq + i) {
+        yield err('E_STORE_CORRUPT', `line ${i}: seq ${payload.value.seq} != expected ${replayAnchorSeq + i}`)
         return
       }
       const linked = chain.check(i, line, payload.value.prev)
@@ -399,11 +400,9 @@ export function openStore(opts: OpenStoreOptions): Result<Store> {
       }
 
       // A deleted id asked for by the caller stays deleted: compaction never resurrects.
-      const keep: Item[] = []
-      for (const id of liveIds) {
-        const item = live.get(id)
-        if (item !== undefined) keep.push(item)
-      }
+      const requested = new Set(liveIds)
+      // Preserve original add order: history uses the new record sequence to break recency ties.
+      const keep = [...live.values()].filter((item) => requested.has(item.id))
 
       // 2. Build the whole new generation in memory. Seq continues above the old maxSeq, so no
       //    seq is ever reused (spec §10).

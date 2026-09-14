@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  */
 const exposed: Record<string, unknown> = {}
 let nextResult: unknown = { ok: true, value: {} }
+const listeners = new Map<string, Set<(event: unknown, payload: unknown) => void>>()
 
 vi.mock('electron', () => ({
   contextBridge: {
@@ -19,8 +20,13 @@ vi.mock('electron', () => ({
   },
   ipcRenderer: {
     invoke: () => Promise.resolve(nextResult),
-    on: () => {},
-    removeListener: () => {},
+    on: (channel: string, listener: (event: unknown, payload: unknown) => void) => {
+      if (!listeners.has(channel)) listeners.set(channel, new Set())
+      listeners.get(channel)!.add(listener)
+    },
+    removeListener: (channel: string, listener: (event: unknown, payload: unknown) => void) => {
+      listeners.get(channel)?.delete(listener)
+    },
   },
 }))
 
@@ -46,7 +52,21 @@ const CALLS: readonly [string, unknown][] = [
   ['securityStatus', undefined],
 ]
 
-beforeEach(() => { nextResult = { ok: true, value: {} } })
+beforeEach(() => { nextResult = { ok: true, value: {} }; listeners.clear() })
+
+it('delivers hidden notifications without exposing the Electron event and removes the listener', async () => {
+  await loadPreload()
+  const api = exposed['cairn'] as { onPaletteHidden(cb: (payload: unknown) => void): () => void }
+  const received = vi.fn()
+  const unsubscribe = api.onPaletteHidden(received)
+  const event = { sender: 'synthetic privileged sender' }
+  for (const listener of listeners.get('cairn:palette.hidden') ?? []) listener(event, {})
+  expect(received).toHaveBeenCalledTimes(1)
+  expect(received).toHaveBeenCalledWith({})
+  unsubscribe()
+  for (const listener of listeners.get('cairn:palette.hidden') ?? []) listener(event, {})
+  expect(received).toHaveBeenCalledTimes(1)
+})
 
 describe('the bridge unwraps the main process Result', () => {
   it('resolves with `value`, not the wrapper, for every request method', async () => {

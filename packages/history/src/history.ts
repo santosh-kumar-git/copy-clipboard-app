@@ -178,6 +178,7 @@ export function createHistory(deps: HistoryDeps): History {
   /** itemId -> the store `seq` of its ITEM_ADDED record. Restart-identical, unlike a random id. */
   const ord = new Map<ItemId, number>()
   const byHash = new Map<ContentHash, ItemId>()
+  const pendingBlobDeletes = new Set<BlobId>()
   const listeners = new Set<(e: { reason: ChangeReason; total: number }) => void>()
   /** False after evictPreviewCache() until the next load(). Guards `search()` (spec §11 control 6). */
   let previewsLoaded = true
@@ -220,23 +221,27 @@ export function createHistory(deps: HistoryDeps): History {
     ...it.repRefs.map((ref) => ref.blobId),
     ...(it.thumbnailBlobId === null ? [] : [it.thumbnailBlobId]),
   ])
-  const deleteUnreferencedBlobs = (removed: Item): Result<void> => {
-    const unreferenced = blobIds(removed)
+  const deleteUnreferencedBlobs = (): Result<void> => {
     for (const it of items.values()) {
-      if (it.id === removed.id) continue
-      for (const id of blobIds(it)) unreferenced.delete(id)
+      for (const id of blobIds(it)) pendingBlobDeletes.delete(id)
     }
-    for (const id of unreferenced) {
+    let result: Result<void> = ok(undefined)
+    for (const id of pendingBlobDeletes) {
       const deleted = store.deleteBlob(id)
-      if (!deleted.ok) return deleted
+      if (!deleted.ok) {
+        if (result.ok) result = deleted
+      } else {
+        pendingBlobDeletes.delete(id)
+      }
     }
-    return ok(undefined)
+    return result
   }
 
   const replay = async (): Promise<Result<{ items: number }>> => {
     const startedAtEpoch = evictionEpoch
     const restored = new Map<ItemId, Item>()
     const restoredOrd = new Map<ItemId, number>()
+    const restoredDeletes = new Set<BlobId>()
     for await (const rec of store.readAll()) {
       if (!rec.ok) return rec
       const ev = rec.value
@@ -247,6 +252,8 @@ export function createHistory(deps: HistoryDeps): History {
         const cur = restored.get(ev.id)
         if (cur !== undefined) restored.set(ev.id, withDefaults({ ...cur, ...ev.patch }))
       } else if (ev.kind === 'ITEM_DELETED') {
+        const removed = restored.get(ev.id)
+        if (removed !== undefined) for (const id of blobIds(removed)) restoredDeletes.add(id)
         restored.delete(ev.id)
         restoredOrd.delete(ev.id)
       }
@@ -261,6 +268,9 @@ export function createHistory(deps: HistoryDeps): History {
     for (const [id, seq] of restoredOrd) ord.set(id, seq)
     for (const [hash, id] of indexByContentHash(items.values())) byHash.set(hash, id)
     for (const it of items.values()) reindex(it)
+    for (const id of restoredDeletes) pendingBlobDeletes.add(id)
+    const deleted = deleteUnreferencedBlobs()
+    if (!deleted.ok) return deleted
     return ok({ items: items.size })
   }
 
@@ -532,14 +542,18 @@ export function createHistory(deps: HistoryDeps): History {
         if (!loaded.ok) return loaded
       }
       const it = items.get(id)
-      if (it === undefined) return ok({ removed: false })
+      if (it === undefined) {
+        const deleted = deleteUnreferencedBlobs()
+        return deleted.ok ? ok({ removed: false }) : deleted
+      }
       const appended = store.appendEvent({ kind: 'ITEM_DELETED', id, reason: 'user' })
       if (!appended.ok) return appended
-      const deleted = deleteUnreferencedBlobs(it)
-      if (!deleted.ok) return deleted
+      for (const blobId of blobIds(it)) pendingBlobDeletes.add(blobId)
       forget(id)
+      const deleted = deleteUnreferencedBlobs()
       logger.info('history.removed', { itemId: id })
       emit('delete')
+      if (!deleted.ok) return deleted
       return ok({ removed: true })
     },
 
@@ -549,6 +563,8 @@ export function createHistory(deps: HistoryDeps): History {
         if (!loaded.ok) return loaded
       }
       const plan: readonly Eviction[] = planEviction([...items.values()], clock.now(), limits)
+      let evicted = 0
+      let persisted: Result<void> = ok(undefined)
       for (const ev of plan) {
         const it = items.get(ev.id)
         if (it === undefined) continue
@@ -559,16 +575,22 @@ export function createHistory(deps: HistoryDeps): History {
           id: ev.id,
           reason: ev.reason,
         })
-        if (!appended.ok) return appended
-        const deleted = deleteUnreferencedBlobs(it)
-        if (!deleted.ok) return deleted
+        if (!appended.ok) {
+          persisted = appended
+          break
+        }
+        for (const id of blobIds(it)) pendingBlobDeletes.add(id)
         forget(ev.id)
+        evicted += 1
       }
-      if (plan.length > 0) {
-        logger.info('history.evicted', { count: plan.length })
+      const deleted = deleteUnreferencedBlobs()
+      if (evicted > 0) {
+        logger.info('history.evicted', { count: evicted })
         emit('evict')
       }
-      return ok({ evicted: plan.length })
+      if (!persisted.ok) return persisted
+      if (!deleted.ok) return deleted
+      return ok({ evicted })
     },
 
     evictPreviewCache() {

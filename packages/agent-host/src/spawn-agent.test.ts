@@ -50,6 +50,7 @@ function handle(req) {
   const id = req.id
   const m = req.method
   if (m === 'hello') {
+    if (MODE === 'silent-restart' && id !== '1') { log('stub.hello-ignored'); return }
     const caps = MODE === 'wrong-wire' ? Object.assign({}, CAPS, { wireMajor: 2 }) : CAPS
     return out({ v: 1, t: 'res', id: id, ok: true, result: caps })
   }
@@ -66,7 +67,7 @@ function handle(req) {
   }
   if (m === 'read') {
     if (MODE === 'silent-read') return
-    if (MODE === 'crash-on-read') return process.exit(3)
+    if (MODE === 'crash-on-read' || MODE === 'silent-restart') return process.exit(3)
     return out({ v: 1, t: 'res', id: id, ok: true, result: { changeCount: req.params.changeCount, hints: [], reps: [] } })
   }
   if (m === 'write') return out({ v: 1, t: 'res', id: id, ok: true, result: { changeToken: '365' } })
@@ -321,6 +322,29 @@ it('gives up after maxRestarts and answers every later request with E_AGENT_EXIT
       message: 'agent gave up after 1 restarts',
     })
     expect(stubEvents.filter((e) => e === 'stub.started')).toHaveLength(2)
+  } finally {
+    await agent.dispose()
+  }
+})
+
+it('replaces a restarted child that never completes hello', async () => {
+  const { agent, clock, lines, stubEvents } = stub('silent-restart')
+  try {
+    await agent.start()
+    await agent.request('watch.start', { intervalMs: 500 })
+    await expect(agent.request('read', { changeCount: 1 })).resolves.toMatchObject({
+      ok: false, code: 'E_AGENT_EXIT',
+    })
+    clock.advance(RESTART_BACKOFF_MS[0])
+    await waitFor(() => stubEvents.includes('stub.hello-ignored'), 'the replacement hello')
+    clock.advance(AGENT_REQUEST_TIMEOUT_MS)
+    await waitFor(
+      () => lines.filter((l) => l.event === 'agent.restart-scheduled').length === 2,
+      'a replacement for the unresponsive child',
+      1_000,
+    )
+    expect(lines.filter((l) => l.event === 'agent.restart-scheduled')[1]!.fields)
+      .toEqual({ attempt: 2, durationMs: RESTART_BACKOFF_MS[1] })
   } finally {
     await agent.dispose()
   }

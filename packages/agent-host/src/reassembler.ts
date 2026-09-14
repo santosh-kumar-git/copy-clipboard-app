@@ -308,6 +308,13 @@ export function createChangeAssembler(opts: {
       }
       pending.push(p)
       for (const c of chunked) {
+        if (owner.has(c.rep.repId)) {
+          p.slots[c.slot]!.dropped = 'E_REP_TOO_MANY'
+          p.outstanding -= 1
+          logger.warn('rep.stream-aborted', { code: 'E_REP_TOO_MANY', mime: c.rep.mime })
+          if (p.outstanding === 0) finish(p)
+          continue
+        }
         owner.set(c.rep.repId, { change: p, slot: c.slot })
         reassembler.declare(c.rep)
       }

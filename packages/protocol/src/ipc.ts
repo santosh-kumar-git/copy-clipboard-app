@@ -21,6 +21,7 @@ export const IPC_EVENT_CHANNELS = [
   'cairn:hotkey.status',
   'cairn:toast',
   'cairn:palette.shown',
+  'cairn:palette.hidden',
 ] as const
 export type IpcEventChannel = (typeof IPC_EVENT_CHANNELS)[number]
 
@@ -164,6 +165,7 @@ export const IpcEventSchema = {
   'cairn:hotkey.status': z.object({ status: z.enum(['active', 'unbound', 'failed']), accelerator: z.string() }),
   'cairn:toast': z.object({ text: z.string().max(200), tone: z.enum(['info', 'warn']) }),
   'cairn:palette.shown': z.object({ shownAt: z.int() }),
+  'cairn:palette.hidden': z.object({}),
 } as const
 
 export type IpcRequest = {

@@ -25,6 +25,7 @@ import { createStderrLogger } from './logger'
 import { assertEditMenuIntact, buildAppMenuTemplate } from './menu'
 import { createTray, trayIconPath, type TrayLike } from './tray'
 import { composeApp } from './wiring'
+import { registerShutdown } from './shutdown'
 import { cspPolicy, createPaletteWindow, hardenSession, resolveRuntimeMode } from './windows'
 
 // =============================================================================================
@@ -243,7 +244,21 @@ async function main(): Promise<void> {
     },
   })
 
-  const started = await cairn.start()
+  const startup = cairn.start()
+  let quitting = false
+  registerShutdown(app, async () => {
+    quitting = true
+    paletteRef = null
+    trayRef?.destroy()
+    try {
+      await startup
+    } finally {
+      await cairn.stop()
+    }
+  }, logger)
+
+  const started = await startup
+  if (quitting) return
   if (!started.ok) throw new Error(`cairn: startup failed: ${started.code} ${started.message}`)
   paletteRef = cairn
 
@@ -264,11 +279,10 @@ async function main(): Promise<void> {
     onQuit: () => { app.quit() },
     logger,
   })
-
-  app.on('before-quit', () => {
-    trayRef?.destroy()
-    void cairn.stop()
-  })
 }
 
-void app.whenReady().then(main)
+void app.whenReady().then(main).catch(() => {
+  logger.error('app.ready', { ok: false, code: 'E_INTERNAL' })
+  dialog.showErrorBox('Cairn could not start', 'Restart Cairn to try again.')
+  app.quit()
+})

@@ -13,6 +13,10 @@ let CHUNK_THRESHOLD_BYTES = 65_536
 let CHUNK_PAYLOAD_BYTES = 32_768
 let MAX_REP_BYTES = 20_971_520
 let MAX_LINE_BYTES = 1_048_576
+let MAX_WRITE_REPS = 8
+let MAX_WRITE_BYTES = 67_108_864
+let REP_STREAM_TIMEOUT_MS = 5_000
+let WRITE_TRANSFER_TIMEOUT_MS = 30_000
 let AGENT_REQUEST_TIMEOUT_MS = 2_000
 let WATCH_INTERVAL_MS = 500
 
@@ -192,6 +196,7 @@ struct SuspendReasons {
 /// unterminated line longer than the guard is a memory attack rather than a message.
 struct LineSplitter {
   private var buf = Data()
+  private var discarding = false
   /// Counts lines dropped for exceeding MAX_LINE_BYTES, so the caller can log the fact once.
   private(set) var droppedOverlongLines = 0
 
@@ -201,15 +206,22 @@ struct LineSplitter {
     while let nl = buf.firstIndex(of: 0x0A) {
       let line = buf.subdata(in: buf.startIndex..<nl)
       buf.removeSubrange(buf.startIndex...nl)
+      if discarding {
+        discarding = false
+        continue
+      }
       if line.count > MAX_LINE_BYTES {
         droppedOverlongLines += 1
         continue
       }
       if !line.isEmpty { lines.append(line) }
     }
-    if buf.count > MAX_LINE_BYTES {
+    if discarding {
+      buf.removeAll(keepingCapacity: false)
+    } else if buf.count > MAX_LINE_BYTES {
       droppedOverlongLines += 1
       buf.removeAll(keepingCapacity: false)
+      discarding = true
     }
     return lines
   }

@@ -137,6 +137,202 @@ describe('labels', () => {
 })
 
 describe('PaletteState', () => {
+  it('does not repopulate a preview from a list reply that arrives after close', async () => {
+    const item = makeItem(0)
+    const fake = createFakeApi({ items: [item], previews: new Map([
+      [item.id, { text: 'synthetic private body', isHtmlSource: false, truncated: false }],
+    ]) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    fake.deferred = true
+    const reloading = state.reload()
+    fake.deferred = false
+    await state.close()
+    fake.pending.shift()!()
+    await reloading
+    expect(state.previewText).toBe('')
+    expect(state.rows).toEqual([])
+    expect(fake.previewCalls).toEqual([item.id])
+    state.dispose()
+  })
+
+  it('scrubs hidden content and ignores history events until reopening', async () => {
+    const item = makeItem(0, { title: 'Private login' })
+    const fake = createFakeApi({ items: [item], previews: new Map([
+      [item.id, { text: 'synthetic private body', isHtmlSource: false, truncated: false }],
+    ]) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    await state.revealPreview()
+    expect(state.previewText).toBe('synthetic private body')
+    fake.emitPaletteHidden()
+    expect(state.previewText).toBe('')
+    expect(state.rows).toEqual([])
+    const requests = fake.listCalls.length
+    fake.emitHistoryChanged({ reason: 'update', total: 1 })
+    await state.pending
+    expect(fake.listCalls).toHaveLength(requests)
+    fake.emitPaletteShown({ shownAt: 123 })
+    await state.pending
+    expect(state.selectedItem?.id).toBe(item.id)
+    expect(state.contentHidden).toBe(true)
+    expect(state.previewText).toBe('')
+    state.dispose()
+  })
+
+  it('ignores an offscreen reply after returning to cached rows', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 120 }, (_, i) => makeItem(i)) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    fake.deferred = true
+    state.setScrollTop(100 * ROW_HEIGHT_PX)
+    const away = state.pending
+    state.setScrollTop(0)
+    await state.pending
+    fake.deferred = false
+    fake.pending.shift()!()
+    await away
+    expect(state.windowStart).toBe(0)
+    expect(state.rowsOffset).toBe(0)
+    expect(state.visibleRows.every(row => row.item !== null)).toBe(true)
+    state.dispose()
+  })
+
+  it('preserves the selected clip across overlapping history refreshes', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1), makeItem(2)] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('ArrowDown')
+    await state.pending
+    fake.deferred = true
+    fake.items.unshift(makeItem(100))
+    fake.emitHistoryChanged({ reason: 'ingest', total: 4 })
+    const older = state.pending
+    fake.items.unshift(makeItem(101))
+    fake.emitHistoryChanged({ reason: 'ingest', total: 5 })
+    const newer = state.pending
+    const [resolveOlder, resolveNewer] = fake.pending.splice(0, 2)
+    fake.deferred = false
+    resolveNewer!()
+    await newer
+    resolveOlder!()
+    await older
+    await state.recall()
+    expect(fake.copyCalls).toEqual([testItemId(1)])
+    expect(state.selectedItem?.id).toBe(testItemId(1))
+    state.dispose()
+  })
+
+  it('honors navigation while a history refresh is pending', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1), makeItem(2)] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('ArrowDown')
+    await state.pending
+    fake.deferred = true
+    fake.items.unshift(makeItem(100))
+    fake.emitHistoryChanged({ reason: 'ingest', total: 4 })
+    const refresh = state.pending
+    state.moveSelection('Home')
+    const navigation = state.pending
+    fake.deferred = false
+    for (const resolve of fake.pending.splice(0)) resolve()
+    await Promise.all([refresh, navigation])
+    expect(state.selectedItem?.id).toBe(testItemId(100))
+    state.dispose()
+  })
+
+  it('keeps the selected clip when a new capture shifts the visible page', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 120 }, (_, i) => makeItem(i)) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('End')
+    await state.pending
+    fake.items.unshift(makeItem(999))
+    fake.emitHistoryChanged({ reason: 'ingest', total: 121 })
+    await state.pending
+    expect(state.selectedItem?.id).toBe(testItemId(119))
+    state.dispose()
+  })
+
+  it('applies an open tab editor to its original clip if the selection changes', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.openTagging()
+    state.tagDraft = 'work'
+    state.selectedIndex = 1
+    await state.commitTag()
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work', tagged: true }])
+    state.dispose()
+  })
+
+  it('reloads the visible page after history changes instead of leaving scrolled rows blank', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 120 }, (_, i) => makeItem(i)) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('End')
+    await state.pending
+    fake.emitHistoryChanged({ reason: 'update', total: 120 })
+    await state.pending
+    expect(state.selectedItem?.id).toBe(testItemId(119))
+    expect(state.visibleRows.every(row => row.item !== null)).toBe(true)
+    expect(fake.listCalls.at(-1)?.offset).toBeGreaterThan(0)
+    state.dispose()
+  })
+
+  it('clamps the scroll position and reloads surviving rows after the last page disappears', async () => {
+    const fake = createFakeApi({ items: Array.from({ length: 120 }, (_, i) => makeItem(i)) })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('End')
+    await state.pending
+    fake.items = fake.items.slice(0, 10)
+    fake.emitHistoryChanged({ reason: 'delete', total: 10 })
+    await state.pending
+    expect(state.windowStart).toBe(2)
+    expect(state.selectedItem?.id).toBe(testItemId(9))
+    expect(state.visibleRows.every(row => row.item !== null)).toBe(true)
+    state.dispose()
+  })
+
+  it('refreshes active search results when an item is deleted without clearing the query', async () => {
+    const item = makeItem(0, { preview: 'needle' })
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'needle body', isHtmlSource: false, truncated: false }]]),
+    })
+    fake.searchHitsFor = () => fake.items.map(item => ({ item, score: 1, ranges: [] }))
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    await state.setQuery('needle')
+    fake.items = []
+    fake.emitHistoryChanged({ reason: 'delete', total: 0 })
+    await state.pending
+    expect(state.query).toBe('needle')
+    expect(state.total).toBe(0)
+    expect(state.selectedItem).toBeNull()
+    expect(state.previewText).toBe('')
+    state.dispose()
+  })
+
+  it('clears old preview content as soon as a history refresh starts', async () => {
+    const item = makeItem(0)
+    const fake = createFakeApi({
+      items: [item],
+      previews: new Map([[item.id, { text: 'old preview content', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    fake.deferred = true
+    fake.emitHistoryChanged({ reason: 'update', total: 1 })
+    expect(state.previewText).toBe('')
+    fake.deferred = false
+    fake.pending[0]!()
+    await state.pending
+    state.dispose()
+  })
+
   it('discards a slow type-filter reply after the user chooses another type', async () => {
     const fake = createFakeApi({ items: [
       makeItem(0, { kind: 'image' }), makeItem(1, { kind: 'files' }), makeItem(2),
@@ -193,6 +389,31 @@ describe('PaletteState', () => {
     state.moveSelection('End')
     await state.pending
     expect(state.previewText).toBe('Last clip content')
+    state.dispose()
+  })
+
+  it('loads the preview when a keyboard jump also emits a scroll event', async () => {
+    const first = makeItem(0)
+    const fake = createFakeApi({
+      items: Array.from({ length: 120 }, (_, i) => makeItem(i)),
+      previews: new Map([[first.id, { text: 'First clip content', isHtmlSource: false, truncated: false }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    state.moveSelection('End')
+    await state.pending
+    fake.deferred = true
+    state.moveSelection('Home')
+    const navigation = state.pending
+    state.setScrollTop(0)
+    const scrolling = state.pending
+    fake.deferred = false
+    fake.pending[0]!()
+    await navigation
+    fake.pending[1]?.()
+    await scrolling
+    expect(state.selectedItem?.id).toBe(first.id)
+    expect(state.previewText).toBe('First clip content')
     state.dispose()
   })
 

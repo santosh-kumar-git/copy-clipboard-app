@@ -28,7 +28,7 @@ const summary = {
 }
 
 describe('the channel lists are frozen and complete', () => {
-  it('has eleven request channels and four event channels, each with a schema', () => {
+  it('has eleven request channels and five event channels, each with a schema', () => {
     expect(IPC_REQUEST_CHANNELS).toEqual([
       'cairn:history.list',
       'cairn:history.search',
@@ -47,6 +47,7 @@ describe('the channel lists are frozen and complete', () => {
       'cairn:hotkey.status',
       'cairn:toast',
       'cairn:palette.shown',
+      'cairn:palette.hidden',
     ])
     for (const c of IPC_REQUEST_CHANNELS) {
       expect(IpcRequestSchema[c].params).toBeDefined()
@@ -54,7 +55,16 @@ describe('the channel lists are frozen and complete', () => {
     }
     for (const c of IPC_EVENT_CHANNELS) expect(IpcEventSchema[c]).toBeDefined()
     expect(Object.keys(IpcRequestSchema)).toHaveLength(11)
-    expect(Object.keys(IpcEventSchema)).toHaveLength(4)
+    expect(Object.keys(IpcEventSchema)).toHaveLength(5)
+  })
+
+  it('carries no preview content in the hidden notification', () => {
+    const hidden = IpcEventSchema['cairn:palette.hidden']
+    expect(hidden.parse({})).toEqual({})
+    expect(hidden.parse({ text: 'synthetic private preview', imageDataUrl: 'synthetic image' })).toEqual({})
+    for (const invalid of [null, undefined, 'hidden', []]) {
+      expect(hidden.safeParse(invalid).success).toBe(false)
+    }
   })
 })
 

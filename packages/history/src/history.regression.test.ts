@@ -1,10 +1,11 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   SECRET_TTL_MS,
   contentHash,
   createTestClock,
+  err,
   type Candidate,
   type Item,
   type ItemKind,
@@ -18,6 +19,7 @@ import { DEFAULT_RETENTION } from './retention'
 
 const cleanups: (() => void)[] = []
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const cleanup of cleanups.splice(0)) cleanup()
 })
 
@@ -365,4 +367,80 @@ it('finishes a recall before an overlapping deletion can remove its remaining re
   const [recalled, removed] = await Promise.all([history.resolveReps(item.id), history.remove(item.id)])
   expect(recalled).toMatchObject({ ok: true, value: [{}, {}, {}] })
   expect(removed).toEqual({ ok: true, value: { removed: true } })
+})
+
+it('preserves same-tick list and search ordering when compaction receives newest-first ids', async () => {
+  const { history, store, makeHistory } = harness()
+  const first = await add(history, candidate('warehouse first'))
+  const second = await add(history, candidate('warehouse second'))
+  const before = history.list()
+  expect(before.items.map((item) => item.id)).toEqual([second.id, first.id])
+  expect(store.compact(before.items.map((item) => item.id)).ok).toBe(true)
+  const reloaded = makeHistory().history
+  expect((await reloaded.load()).ok).toBe(true)
+  expect(reloaded.list()).toEqual(before)
+  expect(reloaded.search('warehouse', 10).map((hit) => hit.item.id)).toEqual([second.id, first.id])
+})
+
+describe.each(['remove', 'evict'] as const)('blob cleanup failures during %s', (action) => {
+  it('hides a durably deleted item immediately and retries cleanup on the next sweep', async () => {
+    const { history, store, makeHistory } = harness(0)
+    const item = await add(history, sharedCandidate('deleted synthetic body', 'both'))
+    const changes: string[] = []
+    history.onChange((event) => changes.push(event.reason))
+    vi.spyOn(store, 'deleteBlob').mockReturnValueOnce(err('E_STORE_IO', 'synthetic unlink failure'))
+
+    const result = action === 'remove' ? await history.remove(item.id) : await history.evictNow()
+    expect(result).toMatchObject({ ok: false, code: 'E_STORE_IO' })
+    expect.soft(history.get(item.id)).toBeUndefined()
+    expect.soft(history.list().total).toBe(0)
+    expect.soft(history.search('deleted', 10)).toEqual([])
+    expect.soft(await history.resolveReps(item.id)).toMatchObject({ ok: false, code: 'E_ITEM_NOT_FOUND' })
+    expect.soft(changes).toEqual([action === 'remove' ? 'delete' : 'evict'])
+
+    expect(await history.evictNow()).toEqual({ ok: true, value: { evicted: 0 } })
+    expect(store.stat()).toMatchObject({ ok: true, value: { blobCount: 0 } })
+    const reloaded = makeHistory().history
+    expect((await reloaded.load()).ok).toBe(true)
+    expect(reloaded.list()).toEqual(history.list())
+  })
+
+  it('recovers interrupted cleanup on reload without deleting a surviving shared blob', async () => {
+    const { history, store, makeHistory, clock } = harness(1)
+    const removed = await add(history, sharedCandidate('older synthetic body', 'both'))
+    clock.advance(1)
+    const survivor = await add(history, sharedCandidate('newer synthetic body', 'both'))
+    vi.spyOn(store, 'deleteBlob').mockReturnValueOnce(err('E_STORE_IO', 'synthetic unlink failure'))
+    const result = action === 'remove' ? await history.remove(removed.id) : await history.evictNow()
+    expect(result).toMatchObject({ ok: false, code: 'E_STORE_IO' })
+
+    const reloaded = makeHistory().history
+    expect((await reloaded.load()).ok).toBe(true)
+    expect(reloaded.list().items.map((item) => item.id)).toEqual([survivor.id])
+    expect(store.getBlob(removed.repRefs[0]!.blobId)).toMatchObject({ ok: false, code: 'E_BLOB_MISSING' })
+    expect(await reloaded.resolveReps(survivor.id)).toMatchObject({ ok: true, value: [{}, {}, {}] })
+    expect(store.getBlob(contentHash(sharedBytes))).toEqual({ ok: true, value: sharedBytes })
+  })
+})
+
+it('publishes completed evictions when a later delete record cannot be persisted', async () => {
+  const { history, store, clock, makeHistory } = harness(0)
+  const first = await add(history, candidate('first synthetic body'))
+  clock.advance(1)
+  const second = await add(history, candidate('second synthetic body'))
+  const changes: { reason: string; total: number }[] = []
+  history.onChange((event) => changes.push(event))
+  const append = store.appendEvent.bind(store)
+  vi.spyOn(store, 'appendEvent')
+    .mockImplementationOnce(append)
+    .mockReturnValueOnce(err('E_STORE_IO', 'synthetic append failure'))
+
+  expect(await history.evictNow()).toMatchObject({ ok: false, code: 'E_STORE_IO' })
+  expect(history.get(second.id)).toBeUndefined()
+  expect(history.list().items.map((item) => item.id)).toEqual([first.id])
+  expect(changes).toEqual([{ reason: 'evict', total: 1 }])
+  const reloaded = makeHistory().history
+  expect((await reloaded.load()).ok).toBe(true)
+  expect(reloaded.list()).toEqual(history.list())
+  expect((await reloaded.resolveReps(first.id)).ok).toBe(true)
 })

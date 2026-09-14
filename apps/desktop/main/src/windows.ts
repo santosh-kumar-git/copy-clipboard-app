@@ -3,6 +3,7 @@ import {
   PALETTE_HEIGHT, PALETTE_MIN_HEIGHT, PALETTE_MIN_WIDTH, PALETTE_SCREEN_MARGIN, PALETTE_WIDTH,
 } from './constants'
 import type { Clock, IpcEventChannel, Logger } from '@cairn/protocol'
+import { sendIpcEvent } from './ipc-handlers'
 
 export type RuntimeMode = 'packaged' | 'dev'
 
@@ -296,6 +297,8 @@ export function createPaletteWindow(deps: {
     presented = false
     shown = false
     awaitingShownAt = null
+    if (win.isDestroyed()) return
+    sendIpcEvent(win.webContents, 'cairn:palette.hidden', {}, logger)
     if (win.isVisible()) win.hide()
   }
   win.webContents.setBackgroundThrottling(false)

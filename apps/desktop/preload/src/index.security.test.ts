@@ -36,13 +36,13 @@ describe('the exposed surface', () => {
     expect(Object.keys(exposed)).toEqual(['cairn'])
   })
 
-  it('is EXACTLY these fifteen methods — no more, no fewer', async () => {
+  it('is EXACTLY these sixteen methods — no more, no fewer', async () => {
     const api = await loadPreload()
     expect(Object.keys(api).sort()).toEqual([
-      'close', 'list', 'onHistoryChanged', 'onHotkeyStatus', 'onPaletteShown', 'onToast',
+      'close', 'list', 'onHistoryChanged', 'onHotkeyStatus', 'onPaletteHidden', 'onPaletteShown', 'onToast',
       'paletteReady', 'pin', 'preview', 'remove', 'search', 'securityStatus', 'setTitle', 'tag',
     ].concat(['copy']).sort())
-    expect(Object.keys(api)).toHaveLength(15)
+    expect(Object.keys(api)).toHaveLength(16)
   })
 
   it('exposes no generic bridge into the main process', async () => {
@@ -110,6 +110,7 @@ describe('channel hard-coding', () => {
       api['onHotkeyStatus']!(() => {}),
       api['onToast']!(() => {}),
       api['onPaletteShown']!(() => {}),
+      api['onPaletteHidden']!(() => {}),
     ]
     expect(onCalls).toEqual([...IPC_EVENT_CHANNELS])
     for (const u of unsubs) u()
@@ -139,11 +140,11 @@ describe('the preload source itself', () => {
 
   it('never lets the page choose a channel name', () => {
     // The property that matters is that no channel reachable FROM THE PAGE is variable. Every one of
-    // the thirteen exposed methods therefore names its channel as a quoted 'cairn:…' literal at its
-    // own call site: the nine request methods pass it straight to ipcRenderer.invoke, and the four
+    // the sixteen exposed methods therefore names its channel as a quoted 'cairn:…' literal at its
+    // own call site: the eleven request methods pass it straight to ipcRenderer.invoke, and the five
     // event methods pass it to the local `subscribe` helper.
     const literals = [...source.matchAll(/(?:ipcRenderer\.invoke|subscribe)\(\s*('cairn:[a-z.]+')/g)]
-    expect(literals).toHaveLength(15)
+    expect(literals).toHaveLength(16)
 
     // `subscribe` is the ONLY place an identifier may stand where a channel goes, and it is a local
     // function — never exposed — so the page cannot reach it to pick one. Assert both halves: the

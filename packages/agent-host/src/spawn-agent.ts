@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import {
   AGENT_REQUEST_TIMEOUT_MS,
+  MAX_LINE_BYTES,
   err,
   ok,
   parseAgentLine,
@@ -22,6 +23,7 @@ import {
 import { createCorrelator, type Correlator } from './correlator'
 import { createLineSplitter } from './framing'
 import { createChangeAssembler } from './reassembler'
+import { createWriteTransport } from './write-transfer'
 
 /** Sent as `hello.params.hostVersion`. */
 export const HOST_VERSION = '0.1.0'
@@ -81,6 +83,7 @@ export function createAgentCore(opts: {
   })
 
   let consecutiveParseFailures = 0
+  let supportsChunkedWrite = false
   let helloId: string | null = null
   let lastWatchIntervalMs: number | null = null
   let lastAccelerator: string | null = null
@@ -93,6 +96,46 @@ export function createAgentCore(opts: {
       onFatal('E_LINE_TOO_LONG')
     },
   })
+
+  const request = async <M extends AgentMethod>(
+    method: M,
+    params: AgentParams<M>,
+    timeoutMs = AGENT_REQUEST_TIMEOUT_MS,
+  ): Promise<Result<AgentResult<M>>> => {
+    const id = correlator.nextId()
+    if (method === 'hello') helloId = id
+    const line = JSON.stringify({ v: WIRE_MAJOR, t: 'req', id, method, params }) + '\n'
+    if (Buffer.byteLength(line) - 1 > MAX_LINE_BYTES) return err('E_LINE_TOO_LONG', 'agent request exceeds the wire line limit')
+    const promise = correlator.register<AgentResult<M>>(id, method, timeoutMs)
+    let written: Result<void>
+    try {
+      written = send(line)
+    } catch (e) {
+      // The fake agent throws when the host goes off-script. Settle the pending entry so no timer
+      // is left armed, then rethrow so the test fails loudly instead of quietly returning an Err.
+      correlator.fail(id, 'E_INTERNAL', e instanceof Error ? e.message : String(e))
+      throw e
+    }
+    if (!written.ok) {
+      correlator.fail(id, written.code, written.message)
+      return promise
+    }
+    if (method === 'watch.start') {
+      lastWatchIntervalMs = (params as AgentParams<'watch.start'>).intervalMs
+    } else if (method === 'watch.stop') {
+      lastWatchIntervalMs = null
+    } else if (method === 'hotkey.register') {
+      lastAccelerator = (params as AgentParams<'hotkey.register'>).accelerator
+    } else if (method === 'hotkey.unregister') {
+      lastAccelerator = null
+    }
+    const result = await promise
+    if (method === 'hello') supportsChunkedWrite = result.ok && (result.value as AgentCapabilities).chunkedWrite === true
+    return result
+  }
+
+  const write = createWriteTransport({ request, clock, nextId: () => correlator.nextId(),
+    supportsChunks: () => supportsChunkedWrite })
 
   const core: AgentCore = {
     handleBytes(chunk): void {
@@ -156,38 +199,10 @@ export function createAgentCore(opts: {
       }
     },
 
-    async request<M extends AgentMethod>(
-      method: M,
-      params: AgentParams<M>,
-      timeoutMs = AGENT_REQUEST_TIMEOUT_MS,
-    ): Promise<Result<AgentResult<M>>> {
-      const id = correlator.nextId()
-      if (method === 'hello') helloId = id
-      const line = JSON.stringify({ v: WIRE_MAJOR, t: 'req', id, method, params }) + '\n'
-      const promise = correlator.register<AgentResult<M>>(id, method, timeoutMs)
-      let written: Result<void>
-      try {
-        written = send(line)
-      } catch (e) {
-        // The fake agent throws when the host goes off-script. Settle the pending entry so no timer
-        // is left armed, then rethrow so the test fails loudly instead of quietly returning an Err.
-        correlator.fail(id, 'E_INTERNAL', e instanceof Error ? e.message : String(e))
-        throw e
-      }
-      if (!written.ok) {
-        correlator.fail(id, written.code, written.message)
-        return promise
-      }
-      if (method === 'watch.start') {
-        lastWatchIntervalMs = (params as AgentParams<'watch.start'>).intervalMs
-      } else if (method === 'watch.stop') {
-        lastWatchIntervalMs = null
-      } else if (method === 'hotkey.register') {
-        lastAccelerator = (params as AgentParams<'hotkey.register'>).accelerator
-      } else if (method === 'hotkey.unregister') {
-        lastAccelerator = null
-      }
-      return promise
+    request(method, params, timeoutMs = AGENT_REQUEST_TIMEOUT_MS) {
+      return method === 'write'
+        ? write(params as AgentParams<'write'>, timeoutMs) as ReturnType<typeof request<typeof method>>
+        : request(method, params, timeoutMs)
     },
 
     on(event, cb): Unsub {
@@ -211,6 +226,7 @@ export function createAgentCore(opts: {
     },
 
     resetFraming(): void {
+      supportsChunkedWrite = false
       splitter.reset()
       consecutiveParseFailures = 0
     },
@@ -333,6 +349,7 @@ export function spawnAgent(opts: SpawnAgentOptions): ClipboardAgent {
     const r = await core.hello()
     if (!r.ok) {
       logger.error('agent.exited', { code: r.code })
+      killChild()
       return
     }
     logger.info('agent.started', { agent: platform })

@@ -46,6 +46,24 @@ export const UFUZZY_OPTIONS = {
   compare: () => 0,
 } as const
 
+const literalPattern = (text: string, flags = 'i'): RegExp =>
+  new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags)
+
+function requiredLiterals(terms: readonly string[]): RegExp[] {
+  return terms.flatMap((term) => {
+    let contraction = ''
+    const base = term.replace(/'[a-z]{1,2}\b/gi, (suffix) => {
+      contraction = suffix
+      return ''
+    })
+    if (base.startsWith('"')) return [literalPattern(base.slice(1, -1), 'ig')]
+    const chars = base.split('')
+    // uFuzzy requires the contraction suffix directly after the preceding character.
+    if (contraction !== '') chars.push((chars.pop() ?? '') + contraction)
+    return chars.map((char) => literalPattern(char, 'ig'))
+  })
+}
+
 export function createSearchIndex(opts: { limit?: number } = {}): SearchIndex {
   const capacity = Math.min(opts.limit ?? SEARCH_INDEX_DEFAULT, SEARCH_INDEX_HARD_CAP)
   if (capacity < 1) throw new Error(`createSearchIndex: limit must be >= 1, got ${String(opts.limit)}`)
@@ -114,7 +132,29 @@ export function createSearchIndex(opts: { limit?: number } = {}): SearchIndex {
       const needle = q.trim()
       if (needle === '') return rank(ordered.map((en) => ({ id: en.id, ranges: [] })))
       const haystack = ordered.map((en) => en.preview)
-      const [idxs, info, order] = uf.search(haystack, needle)
+      // With our intraChars option, uFuzzy treats the entire exclusion suffix as one term.
+      const suffix = /(?:\s+|^)-[\s\S]+/.exec(needle)
+      const positive = suffix === null ? needle : needle.slice(0, suffix.index)
+      const term = suffix?.[0].trim().slice(1) ?? ''
+      const literal = term.startsWith('"') ? term.slice(1, -1) : term.replace(/\p{P}/gu, '')
+      const excluded = literal === '' ? null : literalPattern(literal)
+      const tokens = requiredLiterals(uf.split(positive))
+      const candidates: number[] = []
+      for (let i = 0; i < haystack.length; i++) {
+        const text = haystack[i]!
+        if (excluded?.test(text)) continue
+        let cursor = 0
+        // Literal scans are linear; the unlimited-gap regex can backtrack exponentially on misses.
+        if (tokens.every((token) => {
+          token.lastIndex = cursor
+          if (token.exec(text) === null) return false
+          cursor = token.lastIndex
+          return true
+        })) candidates.push(i)
+      }
+      if (tokens.length === 0) return rank(candidates.map((i) => ({ id: ordered[i]!.id, ranges: [] })))
+      if (candidates.length === 0) return []
+      const [idxs, info, order] = uf.search(haystack, positive, 0, undefined, candidates)
       if (idxs === null) return rank(ordered.map((en) => ({ id: en.id, ranges: [] })))
       if (info === null || order === null) {
         return rank(idxs.map((hi) => ({ id: ordered[hi]!.id, ranges: [] })))

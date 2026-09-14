@@ -112,6 +112,22 @@ describe('appendEvent / readAll', () => {
     expect(updated.value.patch).toEqual({ updatedAt: 42, pinned: true })
   })
 
+  it('finishes an existing replay against its original generation when compaction runs between records', async () => {
+    const { store, ids } = seeded(3)
+    const reader = store.readAll()[Symbol.asyncIterator]()
+    const first = await reader.next()
+    expect(first.value).toMatchObject({ ok: true, value: { kind: 'CHECKPOINT', seq: 1 } })
+    expect(store.compact(ids).ok).toBe(true)
+    const remaining: Result<StoreEvent>[] = []
+    for (let step = await reader.next(); !step.done; step = await reader.next()) remaining.push(step.value)
+    expect(remaining).toMatchObject([
+      { ok: true, value: { kind: 'ITEM_ADDED', seq: 2, item: { id: ids[0] } } },
+      { ok: true, value: { kind: 'ITEM_ADDED', seq: 3, item: { id: ids[1] } } },
+      { ok: true, value: { kind: 'ITEM_ADDED', seq: 4, item: { id: ids[2] } } },
+    ])
+    expect((await drain(store)).every((record) => record.ok)).toBe(true)
+  })
+
   it('survives quit and relaunch, and keeps counting from where it stopped', async () => {
     const { dir, key, store, ids } = seeded(3)
     store.close()

@@ -62,6 +62,7 @@ export interface FakeApi {
   emitHotkeyStatus(payload: unknown): void
   emitToast(payload: unknown): void
   emitPaletteShown(payload: unknown): void
+  emitPaletteHidden(): void
 }
 
 export function createFakeApi(
@@ -72,6 +73,7 @@ export function createFakeApi(
     'hotkey.status': [] as ((p: unknown) => void)[],
     toast: [] as ((p: unknown) => void)[],
     'palette.shown': [] as ((p: unknown) => void)[],
+    'palette.hidden': [] as ((p: unknown) => void)[],
   }
   // The bridge types each callback with its own payload type; the fake stores them as
   // `(p: unknown) => void` on purpose, so a test can push a malformed payload through.
@@ -110,6 +112,7 @@ export function createFakeApi(
     emitHotkeyStatus: (p) => listeners['hotkey.status'].forEach((cb) => cb(p)),
     emitToast: (p) => listeners.toast.forEach((cb) => cb(p)),
     emitPaletteShown: (p) => listeners['palette.shown'].forEach((cb) => cb(p)),
+    emitPaletteHidden: () => listeners['palette.hidden'].forEach((cb) => cb({})),
   }
 
   const settle = <T>(value: T): Promise<T> =>
@@ -213,6 +216,7 @@ export function createFakeApi(
     onHotkeyStatus: (cb) => sub(listeners['hotkey.status'], cb),
     onToast: (cb) => sub(listeners.toast, cb),
     onPaletteShown: (cb) => sub(listeners['palette.shown'], cb),
+    onPaletteHidden: (cb) => sub(listeners['palette.hidden'], cb),
   }
   ;(fake as { api: CairnBridge }).api = api
   return fake

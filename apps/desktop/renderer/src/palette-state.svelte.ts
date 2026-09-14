@@ -87,7 +87,7 @@ export const EMPTY_TEXT = 'Nothing copied yet'
 export const EMPTY_TAB_TEXT = 'Nothing filed under this tab yet — anything you file here is kept'
 export const EMPTY_PINNED_TEXT = 'Nothing pinned yet — pinned copies are never evicted'
 export const NO_RESULTS_TEXT = 'No matches'
-export const TAG_PLACEHOLDER = 'Tab name, then ⏎'
+export const TAG_PLACEHOLDER = 'New tab name'
 /** Mirrors `TAGS_MAX_PER_ITEM` in `@cairn/protocol`; asserted equal by palette-state.test.ts, because
  *  the renderer cannot import that barrel at runtime (it re-exports node:crypto). */
 export const MAX_TABS_PER_ITEM = 8
@@ -267,6 +267,7 @@ export class PaletteState {
   activeKind: KindFilter = $state('all')
   /** The inline "file this into a tab" field. Open only while the user is typing a tab name. */
   tagging = $state(false)
+  tagSaving = $state(false)
   tagDraft = $state('')
   titleEditing = $state(false)
   titleDraft = $state('')
@@ -282,11 +283,19 @@ export class PaletteState {
   readonly #deps: PaletteDeps
   readonly #unsubs: (() => void)[] = []
   #listSeq = 0
+  #windowFetch: { seq: number; offset: number; limit: number; result: Promise<boolean> } | null = null
+  #selectionEpoch = 0
+  #refreshSeq = 0
+  #refreshSelectedId: string | undefined
   #previewSeq = 0
+  #tagItemId: string | null = null
+  #tagInitialTags: readonly string[] = []
+  #tagEditSeq = 0
   #cancelToast: Cancel | null = null
   #titleItemId: string | null = null
   #titleEditSeq = 0
   #openingSeq = 0
+  #active = true
 
   constructor(deps: PaletteDeps) {
     this.#deps = deps
@@ -313,6 +322,10 @@ export class PaletteState {
   get contentHidden(): boolean {
     const item = this.selectedItem
     return item?.title != null && this.revealedItemId !== item.id
+  }
+
+  get taggingTags(): readonly string[] {
+    return this.rows.find(item => item?.id === this.#tagItemId)?.tags ?? this.#tagInitialTags
   }
 
   /** What the empty list should say, which depends entirely on WHY it is empty. */
@@ -353,15 +366,18 @@ export class PaletteState {
       }),
       api.onHistoryChanged((raw) => {
         const p = parseHistoryChanged(raw)
-        if (p === null) return
-        if (this.mode === 'recent') this.pending = this.reload()
+        if (p === null || !this.#active) return
+        this.pending = this.refresh()
       }),
+      api.onPaletteHidden(() => this.#scrub()),
       api.onPaletteShown((raw) => {
         const p = parsePaletteShown(raw)
         if (p === null) return
+        this.#active = true
         const openingSeq = ++this.#openingSeq
         // Main re-shows the same window, so "opening the palette" is an event, not a mount.
         this.shownAt = p.shownAt
+        this.#resetRefreshSelection()
         this.query = ''
         this.mode = 'recent'
         this.selectedIndex = 0
@@ -392,24 +408,35 @@ export class PaletteState {
   }
 
   dispose(): void {
-    this.#openingSeq += 1
+    this.#scrub()
     for (const un of this.#unsubs.splice(0)) un()
-    this.#cancelToast?.()
-    this.#cancelToast = null
-    this.hidePreview()
   }
 
-  async reload(): Promise<void> {
+  async reload(selectedId?: string): Promise<void> {
+    if (!this.#active) return
+    const selectionEpoch = this.#selectionEpoch
     this.mode = 'recent'
     this.nowMs = this.#deps.clock.now()
-    this.rowsOffset = 0
+    this.hidePreview()
+    const offset = visibleRange(this.windowStart, this.total, this.viewportRows).start
+    this.rowsOffset = offset
     this.rows = []
     this.rangesByIndex = []
-    await this.#fetchWindow(0)
+    const request = this.#fetchWindow(offset)
+    const seq = this.#listSeq
+    if (!await request || seq !== this.#listSeq) return
+    const local = selectedId === undefined || selectionEpoch !== this.#selectionEpoch
+      ? -1 : this.rows.findIndex(item => item?.id === selectedId)
+    if (local >= 0) this.selectedIndex = this.rowsOffset + local
+    this.windowStart = Math.min(this.windowStart, Math.max(0, this.total - this.viewportRows))
+    if (local >= 0) this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total, this.viewportRows)
+    await this.ensureLoaded()
     await this.loadPreview()
   }
 
   async setQuery(q: string): Promise<void> {
+    if (!this.#active) return
+    this.#resetRefreshSelection()
     this.hidePreview()
     this.query = q
     this.selectedIndex = 0
@@ -438,6 +465,8 @@ export class PaletteState {
   }
 
   moveSelection(key: NavKey): void {
+    if (!this.#active) return
+    this.#resetRefreshSelection()
     this.hidePreview()
     this.selectedIndex = nextIndex(this.selectedIndex, key, this.total)
     this.windowStart = windowStartFor(this.selectedIndex, this.windowStart, this.total, this.viewportRows)
@@ -446,6 +475,7 @@ export class PaletteState {
 
   async viewItem(index: number): Promise<void> {
     if (this.rowAt(index) === null) return
+    this.#resetRefreshSelection()
     this.hidePreview()
     this.selectedIndex = index
     await this.revealPreview()
@@ -470,21 +500,41 @@ export class PaletteState {
   }
 
   async ensureLoaded(): Promise<void> {
-    if (this.mode !== 'recent') return
+    if (!this.#active || this.mode !== 'recent') return
     const { start, end } = visibleRange(this.windowStart, this.total, this.viewportRows)
-    if (start >= this.rowsOffset && end <= this.rowsOffset + this.rows.length) return
+    const fetching = this.#windowFetch
+    if (start >= this.rowsOffset && end <= this.rowsOffset + this.rows.length) {
+      if (fetching?.seq === this.#listSeq && (start < fetching.offset || end > fetching.offset + fetching.limit)) {
+        this.#listSeq += 1
+        this.#windowFetch = null
+      }
+      return
+    }
+    if (fetching?.seq === this.#listSeq && start >= fetching.offset && end <= fetching.offset + fetching.limit) {
+      await fetching.result
+      return
+    }
     await this.#fetchWindow(Math.max(0, start))
   }
 
-  async #fetchWindow(offset: number): Promise<void> {
+  #fetchWindow(offset: number): Promise<boolean> {
     const seq = ++this.#listSeq
+    const limit = Math.min(200, Math.max(FETCH_SPAN, this.viewportRows + OVERSCAN_ROWS * 2))
+    const result = this.#readWindow(offset, limit, seq).finally(() => {
+      if (this.#windowFetch?.seq === seq) this.#windowFetch = null
+    })
+    this.#windowFetch = { seq, offset, limit, result }
+    return result
+  }
+
+  async #readWindow(offset: number, limit: number, seq: number): Promise<boolean> {
     try {
       const res = await this.#deps.api.list({
-        limit: Math.min(200, Math.max(FETCH_SPAN, this.viewportRows + OVERSCAN_ROWS * 2)),
+        limit,
         offset,
         ...this.#filters(),
       })
-      if (seq !== this.#listSeq) return
+      if (seq !== this.#listSeq) return false
       this.rows = [...res.items]
       this.rowsOffset = offset
       this.total = res.total
@@ -495,16 +545,18 @@ export class PaletteState {
       this.rangesByIndex = []
       this.statusText = null
       if (this.selectedIndex >= this.total) this.selectedIndex = Math.max(0, this.total - 1)
+      return true
     } catch {
-      if (seq !== this.#listSeq) return
+      if (seq !== this.#listSeq) return false
       this.statusText = LOAD_FAILED_TEXT
+      return false
     }
   }
 
   async loadPreview(): Promise<void> {
     const seq = ++this.#previewSeq
     const item = this.selectedItem
-    if (item === null || this.contentHidden) {
+    if (!this.#active || item === null || this.contentHidden) {
       this.previewText = ''
       this.previewMime = 'text/plain'
       this.previewImageUrl = null
@@ -550,6 +602,15 @@ export class PaletteState {
   async togglePin(): Promise<void> {
     const item = this.selectedItem
     if (item === null) return
+    await this.#setPin(item, !item.pinned)
+  }
+
+  async fileItem(item: ItemSummary, tab: ActiveTab): Promise<void> {
+    if (tab.kind === 'tag') await this.#applyTag(item.id, tab.tag, true)
+    else if (tab.kind === 'pinned') await this.#setPin(item, true)
+  }
+
+  async #setPin(item: ItemSummary, pinned: boolean): Promise<void> {
     // Spec §11 control 5: secrets are exempt from pinning. Refusing here, with a reason, beats
     // sending an IPC we know will fail.
     if (item.flags.includes('secret')) {
@@ -557,7 +618,7 @@ export class PaletteState {
       return
     }
     try {
-      await this.#deps.api.pin({ id: item.id, pinned: !item.pinned })
+      await this.#deps.api.pin({ id: item.id, pinned })
     } catch {
       this.#showToast({ text: LOAD_FAILED_TEXT, tone: 'warn' })
       return
@@ -601,14 +662,23 @@ export class PaletteState {
   /** Opens the tab-name field for the selected row. There is no separate "create a tab" step: a tab
    *  exists because an item is in it, so typing a new name here is what creates one. */
   openTagging(): void {
-    if (this.selectedItem === null) return
+    const item = this.selectedItem
+    if (item === null) return
     this.closeTitleEditing()
+    this.#tagEditSeq += 1
+    this.#tagItemId = item.id
+    this.#tagInitialTags = item.tags
     this.tagging = true
+    this.tagSaving = false
     this.tagDraft = ''
   }
 
   closeTagging(): void {
+    this.#tagEditSeq += 1
+    this.#tagItemId = null
+    this.#tagInitialTags = []
     this.tagging = false
+    this.tagSaving = false
     this.tagDraft = ''
   }
 
@@ -668,21 +738,30 @@ export class PaletteState {
   }
 
   async commitTag(): Promise<void> {
-    const item = this.selectedItem
+    const id = this.#tagItemId
     const draft = this.tagDraft
-    if (item === null || draft.trim().length === 0) {
+    if (id === null || draft.trim().length === 0) {
       this.closeTagging()
       return
     }
     this.closeTagging()
-    await this.#applyTag(item.id, draft, true)
+    await this.#applyTag(id, draft, true)
+  }
+
+  async toggleTag(tag: string): Promise<void> {
+    const id = this.#tagItemId
+    if (id === null || this.tagSaving) return
+    const seq = this.#tagEditSeq
+    this.tagSaving = true
+    await this.#applyTag(id, tag, !this.taggingTags.includes(tag))
+    if (seq === this.#tagEditSeq) this.tagSaving = false
   }
 
   /** Takes the selected item out of one tab. The chip's ✕ and nothing else calls this. */
   async untag(tag: string): Promise<void> {
-    const item = this.selectedItem
-    if (item === null) return
-    await this.#applyTag(item.id, tag, false)
+    const id = this.#tagItemId ?? this.selectedItem?.id
+    if (id === undefined) return
+    await this.#applyTag(id, tag, false)
   }
 
   async #applyTag(id: string, tag: string, tagged: boolean): Promise<void> {
@@ -693,17 +772,31 @@ export class PaletteState {
       this.#showToast({ text: code === 'E_TAG_LIMIT' ? TAG_LIMIT_TEXT : TAG_FAILED_TEXT, tone: 'warn' })
       return
     }
+    if (this.#tagItemId === id) {
+      this.#tagInitialTags = tagged
+        ? [...new Set([...this.#tagInitialTags, tag])]
+        : this.#tagInitialTags.filter(value => value !== tag)
+    }
     await this.refresh()
   }
 
   /** Re-runs whichever view is on screen. A tab change and a tag change both need this, and doing it
    *  with `reload()` alone silently dropped the user's query. */
   async refresh(): Promise<void> {
+    if (!this.#active) return
     if (this.mode === 'search' && this.query.trim().length > 0) {
       await this.setQuery(this.query)
       return
     }
-    await this.reload()
+    const seq = ++this.#refreshSeq
+    this.#refreshSelectedId = this.selectedItem?.id ?? this.#refreshSelectedId
+    await this.reload(this.#refreshSelectedId)
+    if (seq === this.#refreshSeq) this.#refreshSelectedId = undefined
+  }
+
+  #resetRefreshSelection(): void {
+    this.#selectionEpoch += 1
+    this.#refreshSelectedId = undefined
   }
 
   /** The action bar's one entry point, so a button and its keyboard shortcut cannot drift apart. */
@@ -739,13 +832,32 @@ export class PaletteState {
   }
 
   async close(): Promise<void> {
+    this.#scrub()
+    await this.#deps.api.close()
+  }
+
+  #scrub(): void {
+    this.#active = false
     this.#openingSeq += 1
+    this.#listSeq += 1
+    this.#windowFetch = null
+    this.#resetRefreshSelection()
     this.#cancelToast?.()
     this.#cancelToast = null
     this.toast = null
+    this.closeTagging()
     this.closeTitleEditing()
     this.hidePreview()
-    await this.#deps.api.close()
+    this.query = ''
+    this.rows = []
+    this.rangesByIndex = []
+    this.rowsOffset = 0
+    this.selectedIndex = 0
+    this.windowStart = 0
+    this.total = 0
+    this.tabs = []
+    this.pinnedCount = 0
+    this.statusText = null
   }
 
   #showToast(t: ToastPayload): void {

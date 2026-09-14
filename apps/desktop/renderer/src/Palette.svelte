@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ItemSummary } from '@cairn/protocol'
   import ItemRow from './ItemRow.svelte'
   import Preview from './Preview.svelte'
   import SplitPane from './SplitPane.svelte'
@@ -31,6 +32,9 @@
   let tagEl: HTMLInputElement | null = $state(null)
   let titleEl: HTMLInputElement | null = $state(null)
   let previewLayout: 'bottom' | 'right' = $state('bottom')
+  let draggedItem: ItemSummary | null = $state(null)
+  let dropTarget: ActiveTab | null = $state(null)
+  const clipDragType = 'application/x-cairn-item-id'
 
   const selected = $derived(palette.selectedItem)
   const activeId = $derived(selected === null ? null : `cairn-row-${selected.id}`)
@@ -53,6 +57,7 @@
   // The palette is re-shown without being re-created, so focus follows `shownAt`, not mount.
   $effect(() => {
     void palette.shownAt
+    endDrag()
     inputEl?.focus()
   })
 
@@ -86,6 +91,42 @@
     event.preventDefault()
   }
 
+  function onKindChange(event: Event & { currentTarget: HTMLSelectElement }): void {
+    palette.pending = palette.selectKind(event.currentTarget.value as KindFilter)
+    inputEl?.focus({ preventScroll: true })
+  }
+
+  function startDrag(event: DragEvent, item: ItemSummary): void {
+    if (event.dataTransfer === null || (event.target instanceof Element && event.target.closest('button'))) {
+      event.preventDefault()
+      return
+    }
+    draggedItem = item
+    event.dataTransfer.setData(clipDragType, item.id)
+    event.dataTransfer.effectAllowed = 'copy'
+  }
+
+  function endDrag(): void {
+    draggedItem = null
+    dropTarget = null
+  }
+
+  function dragOver(event: DragEvent, tab: ActiveTab): void {
+    if (draggedItem === null || tab.kind === 'all') return
+    event.preventDefault()
+    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'
+    dropTarget = tab
+  }
+
+  function dropClip(event: DragEvent, tab: ActiveTab): void {
+    const item = draggedItem
+    if (item === null || tab.kind === 'all' || event.dataTransfer?.getData(clipDragType) !== item.id) return
+    event.preventDefault()
+    endDrag()
+    palette.pending = palette.fileItem(item, tab)
+    inputEl?.focus({ preventScroll: true })
+  }
+
   function onKeyDown(event: KeyboardEvent): void {
     const key = event.key
     if (event.target instanceof HTMLSelectElement && key !== 'Escape') return
@@ -105,6 +146,7 @@
     if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
       event.preventDefault()
       palette.moveSelection(key satisfies NavKey)
+      inputEl?.focus({ preventScroll: true })
       return
     }
     if ((event.metaKey || event.ctrlKey) && key.toLowerCase() === 'p') {
@@ -130,15 +172,15 @@
 
   /** The tab field owns Enter and Escape while it is open, so neither reaches the list. */
   function onTagKeyDown(event: KeyboardEvent): void {
+    event.stopPropagation()
+    if (event.target instanceof HTMLButtonElement && (event.key === 'Enter' || event.key === ' ')) return
     if (event.key === 'Enter') {
       event.preventDefault()
-      event.stopPropagation()
       palette.pending = palette.commitTag()
       return
     }
     if (event.key === 'Escape') {
       event.preventDefault()
-      event.stopPropagation()
       palette.closeTagging()
     }
   }
@@ -213,7 +255,14 @@
         type="button"
         class="tab"
         class:tab-active={sameTab(t.tab, palette.activeTab)}
+        class:tab-drop-target={dropTarget !== null && sameTab(t.tab, dropTarget)}
         aria-pressed={sameTab(t.tab, palette.activeTab)}
+        title={t.tab.kind === 'pinned' ? 'Drop a clip here to pin it' : t.tab.kind === 'tag' ? `Drop a clip here to add it to ${t.label}` : undefined}
+        ondragover={(event) => dragOver(event, t.tab)}
+        ondragleave={(event) => {
+          if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) dropTarget = null
+        }}
+        ondrop={(event) => dropClip(event, t.tab)}
         onmousedown={keepFocus}
         onclick={() => (palette.pending = palette.selectTab(t.tab))}
       >
@@ -238,7 +287,7 @@
       aria-label="Filter by type"
       title="Filter clipboard content by type"
       value={palette.activeKind}
-      onchange={(event) => (palette.pending = palette.selectKind(event.currentTarget.value as KindFilter))}
+      onchange={onKindChange}
     >
       {#each KIND_FILTERS as filter (filter.value)}
         <option value={filter.value}>{filter.label}</option>
@@ -272,33 +321,41 @@
   {/if}
 
   {#if palette.tagging}
-    <div class="tag-row" data-testid="tag-row">
+    <div class="tag-row" data-testid="tag-row" role="group" aria-label="Choose tabs" onkeydown={onTagKeyDown}>
+      <div class="tag-heading">
+        <span>{palette.tabs.length > 0 ? 'Choose tabs' : 'Create your first tab'}</span>
+        <button type="button" class="button-quiet" aria-label="Done tagging"
+          onmousedown={keepFocus} onclick={() => palette.closeTagging()}>Done</button>
+      </div>
+      {#if palette.tabs.length > 0}
+        <div class="tag-options">
+          {#each palette.tabs as t (t.tag)}
+            {@const assigned = palette.taggingTags.includes(t.tag)}
+            <button type="button" class="tag-chip" class:tag-chip-active={assigned}
+              aria-label={`${assigned ? 'Remove from' : 'Add to'} ${t.tag}`}
+              aria-pressed={assigned} disabled={palette.tagSaving}
+              onmousedown={keepFocus}
+              onclick={() => (palette.pending = palette.toggleTag(t.tag))}
+            >{#if assigned}<span aria-hidden="true">✓ </span>{/if}{t.tag}</button>
+          {/each}
+        </div>
+      {/if}
+      <div class="tag-create">
       <input
         bind:this={tagEl}
         class="tag-input"
         data-testid="tag-input"
         type="text"
-        list="cairn-tab-names"
-        aria-label="Tab name"
+        aria-label="New tab name"
         placeholder={TAG_PLACEHOLDER}
         autocomplete="off"
         spellcheck="false"
         value={palette.tagDraft}
         oninput={(event) => (palette.tagDraft = event.currentTarget.value)}
-        onkeydown={onTagKeyDown}
       />
-      <datalist id="cairn-tab-names">
-        {#each palette.tabs as t (t.tag)}<option value={t.tag}></option>{/each}
-      </datalist>
-      {#each selected?.tags ?? [] as tag (tag)}
-        <button
-          type="button"
-          class="tag-chip"
-          title={`Take this copy out of ${tag}`}
-          onmousedown={keepFocus}
-          onclick={() => (palette.pending = palette.untag(tag))}>{tag} ✕</button
-        >
-      {/each}
+        <button type="button" class="button-primary" disabled={palette.tagDraft.trim().length === 0 || palette.tagSaving}
+          onmousedown={keepFocus} onclick={() => (palette.pending = palette.commitTag())}>Create tab</button>
+      </div>
     </div>
   {/if}
 
@@ -333,7 +390,10 @@
               top={row.top}
               nowMs={palette.nowMs}
               selected={row.index === palette.selectedIndex}
+              ondragstart={(event) => { if (row.item !== null) startDrag(event, row.item) }}
+              ondragend={endDrag}
               onpick={() => {
+                if (draggedItem !== null) return
                 palette.hidePreview()
                 palette.selectedIndex = row.index
                 palette.pending = palette.recall()

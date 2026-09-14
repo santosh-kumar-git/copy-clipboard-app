@@ -19,6 +19,7 @@ export type HistoryChangedPayload = PayloadOf<'cairn:history.changed'>
 export type HotkeyStatusPayload = PayloadOf<'cairn:hotkey.status'>
 export type ToastPayload = PayloadOf<'cairn:toast'>
 export type PaletteShownPayload = PayloadOf<'cairn:palette.shown'>
+export type PaletteHiddenPayload = PayloadOf<'cairn:palette.hidden'>
 export type HotkeyStatus = HotkeyStatusPayload['status']
 
 /** Named operations only; no generic IPC channel access. */
@@ -38,6 +39,7 @@ export interface CairnBridge {
   onHotkeyStatus(cb: (p: HotkeyStatusPayload) => void): Unsub
   onToast(cb: (p: ToastPayload) => void): Unsub
   onPaletteShown(cb: (p: PaletteShownPayload) => void): Unsub
+  onPaletteHidden(cb: (p: PaletteHiddenPayload) => void): Unsub
 }
 
 declare global {

@@ -357,6 +357,28 @@ describe('createChangeAssembler', () => {
     expect(Buffer.from(emitted[1]!.reps[0]!.bytes).equals(one)).toBe(true)
   })
 
+  it.each([false, true])('preserves the original stream when a repId is reused (same change: %s)', (sameChange) => {
+    const clock = createTestClock()
+    const { logger } = recordingLogger()
+    const emitted: ClipboardChangedPayload[] = []
+    const a = createChangeAssembler({ clock, logger, emit: (p) => emitted.push(p) })
+    const original = wireRep(Buffer.from('original'), 'reused', 'image/png')
+    const duplicate = wireRep(Buffer.from('duplicate'), 'reused', 'image/tiff')
+    if (sameChange) a.handleChanged(changedWire([original, duplicate], 401))
+    else {
+      a.handleChanged(changedWire([original], 401))
+      a.handleChanged(changedWire([duplicate], 402))
+    }
+    a.handleChunk({ repId: 'reused', seq: 0, final: true, b64: Buffer.from('original').toString('base64') })
+    expect(a.pendingChanges).toBe(0)
+    expect(a.openStreams).toBe(0)
+    expect(clock.pending).toBe(0)
+    const originalChange = emitted.find((e) => e.changeCount === 401)!
+    expect(Buffer.from(originalChange.reps[0]!.bytes).toString()).toBe('original')
+    const refusedChange = emitted.find((e) => e.changeCount === (sameChange ? 401 : 402))!
+    expect(refusedChange.droppedReps).toEqual([{ mime: 'image/tiff', code: 'E_REP_TOO_MANY' }])
+  })
+
   it('drops an inline rep whose declared hash does not match its bytes', () => {
     const clock = createTestClock()
     const { logger } = recordingLogger()

@@ -470,13 +470,70 @@ describe('createPaletteWindow', () => {
     rec.blur()
     expect(palette.isVisible()).toBe(false)
     expect(rec.hidden).toBe(1)
+    expect(rec.sent.filter(([channel]) => channel === 'cairn:palette.hidden')).toEqual([
+      ['cairn:palette.hidden', {}],
+    ])
 
     openPalette(palette, 2)
     rec.blur()
     expect(palette.isVisible()).toBe(true)
+    expect(rec.sent.filter(([channel]) => channel === 'cairn:palette.hidden')).toHaveLength(1)
     palette.hide()
     palette.hide()
     expect(rec.hidden).toBe(2)
+    expect(rec.sent.filter(([channel]) => channel === 'cairn:palette.hidden')).toHaveLength(2)
+  })
+
+  it.each([false, true])('scrubs a cancelled preparation even without a native hide (announced: %s)', (announced) => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    palette.show()
+    if (announced) palette.send('cairn:palette.shown', { shownAt: 1 })
+    palette.hide()
+    expect(palette.isVisible()).toBe(false)
+    expect(palette.ready(1)).toBe(false)
+    expect(rec.shown).toBe(0)
+    expect(rec.hidden).toBe(0)
+    expect(rec.sent.at(-1)).toEqual(['cairn:palette.hidden', {}])
+  })
+
+  it('orders the scrub before native hiding and before the next shown notification', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    openPalette(palette)
+    const nativeBlur = rec.blur
+    rec.blur = () => {
+      expect(rec.sent.at(-1)).toEqual(['cairn:palette.hidden', {}])
+      nativeBlur()
+    }
+    palette.show()
+    palette.send('cairn:palette.shown', { shownAt: 2 })
+    expect(rec.sent.map(([channel]) => channel)).toEqual([
+      'cairn:palette.shown', 'cairn:palette.hidden', 'cairn:palette.shown',
+    ])
+    expect(palette.ready(1)).toBe(false)
+    expect(palette.ready(2)).toBe(true)
+  })
+
+  it('does not send a hidden notification to destroyed web contents', () => {
+    const { Ctor, rec } = fakeBrowserWindow()
+    const palette = createPaletteWindow({
+      BrowserWindowCtor: Ctor, screen, mode: 'packaged',
+      preloadPath: '/tmp/preload.js', rendererIndexPath: '/tmp/renderer/index.html',
+      env: {}, clock: createTestClock(), logger: silentLogger(),
+    })
+    palette.show()
+    palette.destroy()
+    expect(() => palette.hide()).not.toThrow()
+    expect(rec.sent).toEqual([])
   })
 
   it.each(['before announcement', 'after announcement'])(

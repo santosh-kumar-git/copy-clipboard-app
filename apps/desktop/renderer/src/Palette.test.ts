@@ -35,6 +35,13 @@ function press(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
   return event
 }
 
+function pressFocused(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })
+  document.activeElement!.dispatchEvent(event)
+  flushSync()
+  return event
+}
+
 function rows(): HTMLElement[] {
   return [...host.querySelectorAll<HTMLElement>('[role="option"]')]
 }
@@ -46,6 +53,98 @@ async function render(fake: FakeApi, clock = createTestClock()): Promise<Palette
   flushSync()
   return state
 }
+
+function clipTransfer() {
+  const data = new Map<string, string>()
+  return {
+    effectAllowed: 'none',
+    dropEffect: 'none',
+    setData: (type: string, value: string) => { data.set(type, value) },
+    getData: (type: string) => data.get(type) ?? '',
+    get types() { return [...data.keys()] },
+  }
+}
+
+function drag(element: Element, type: string, transfer: ReturnType<typeof clipTransfer>): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true })
+  Object.defineProperty(event, 'dataTransfer', { value: transfer })
+  element.dispatchEvent(event)
+  flushSync()
+  return event
+}
+
+describe('dragging clips into tabs', () => {
+  it('tags the dragged clip without copying, closing, or changing the current tab', async () => {
+    const first = makeItem(0, { tags: ['work'] })
+    const second = makeItem(1, { title: 'Private login', preview: 'synthetic private content' })
+    const fake = createFakeApi({ items: [first, second] })
+    const state = await render(fake)
+    const source = rows()[1]!
+    const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('work'))!
+    const transfer = clipTransfer()
+    expect(source.draggable).toBe(true)
+    drag(source, 'dragstart', transfer)
+    expect(transfer.types).toEqual(['application/x-cairn-item-id'])
+    expect(transfer.getData(transfer.types[0]!)).toBe(second.id)
+    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(true)
+    expect(target.classList.contains('tab-drop-target')).toBe(true)
+    drag(target, 'drop', transfer)
+    await state.pending
+    flushSync()
+    expect(fake.tagCalls).toEqual([{ id: second.id, tag: 'work', tagged: true }])
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    expect(state.activeTab).toEqual({ kind: 'all' })
+    expect(host.querySelector('.tab-drop-target')).toBeNull()
+    expect(document.activeElement).toBe(host.querySelector('.search'))
+  })
+
+  it('pins an unselected dragged clip and never toggles an already pinned clip off', async () => {
+    const item = makeItem(1, { pinned: true })
+    const fake = createFakeApi({ items: [makeItem(0), item] })
+    const state = await render(fake)
+    const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('Pinned'))!
+    const transfer = clipTransfer()
+    drag(rows()[1]!, 'dragstart', transfer)
+    drag(target, 'drop', transfer)
+    await state.pending
+    expect(fake.pinCalls).toEqual([{ id: item.id, pinned: true }])
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+  })
+
+  it('rejects secret pinning and ignores external or cancelled drags', async () => {
+    const fake = createFakeApi({ items: [makeItem(0, { flags: ['secret'] })] })
+    const state = await render(fake)
+    const target = [...host.querySelectorAll('.tab')].find(tab => tab.textContent?.startsWith('Pinned'))!
+    const transfer = clipTransfer()
+    transfer.setData('application/x-cairn-item-id', testItemId(0))
+    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(false)
+    drag(target, 'drop', transfer)
+    expect(fake.pinCalls).toEqual([])
+    drag(rows()[0]!, 'dragstart', transfer)
+    drag(target, 'drop', transfer)
+    await state.pending
+    expect(fake.pinCalls).toEqual([])
+    expect(state.toast?.text).toContain('Secret')
+    drag(rows()[0]!, 'dragstart', transfer)
+    drag(rows()[0]!, 'dragend', transfer)
+    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(false)
+  })
+
+  it('does not treat All as a drop target', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    await render(fake)
+    const transfer = clipTransfer()
+    drag(rows()[0]!, 'dragstart', transfer)
+    const target = host.querySelector('.tab')!
+    expect(drag(target, 'dragover', transfer).defaultPrevented).toBe(false)
+    drag(target, 'drop', transfer)
+    expect(fake.tagCalls).toEqual([])
+    expect(fake.pinCalls).toEqual([])
+    expect(fake.copyCalls).toEqual([])
+  })
+})
 
 describe('the palette shell', () => {
   it('focuses the search field on mount and again on every palette.shown', async () => {
@@ -113,6 +212,7 @@ describe('content type filters', () => {
   async function chooseType(value: string, state: PaletteState): Promise<void> {
     const picker = host.querySelector<HTMLSelectElement>('[aria-label="Filter by type"]')
     expect(picker).not.toBeNull()
+    picker!.focus()
     picker!.value = value
     picker!.dispatchEvent(new Event('change', { bubbles: true }))
     await state.pending
@@ -144,6 +244,52 @@ describe('content type filters', () => {
     expect(fake.listCalls.at(-1)?.kind).toBeUndefined()
     expect(fake.copyCalls).toEqual([])
     expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it.each(['bottom', 'right'])('hands focus back after filtering so arrows preview images in the %s layout', async (layout) => {
+    const images = [1, 2, 3].map(n => makeItem(n, { kind: 'image', preview: '' }))
+    const sources = ['iVBORw0KGgoAAQ==', 'iVBORw0KGgoAAg==', 'iVBORw0KGgoAAw=='].map(s => `data:image/png;base64,${s}`)
+    const fake = createFakeApi({
+      items: [makeItem(0), ...images],
+      previews: new Map(images.map((item, i) => [item.id, { text: '', imageDataUrl: sources[i]!, isHtmlSource: false, truncated: false }])),
+    })
+    const state = await render(fake)
+    if (layout === 'right') host.querySelector<HTMLButtonElement>('[aria-label="Preview on right"]')!.click()
+    await chooseType('image', state)
+    expect(document.activeElement).toBe(host.querySelector('[data-testid="search"]'))
+    for (const [key, index] of [['ArrowDown', 1], ['ArrowDown', 2], ['ArrowUp', 1], ['Home', 0], ['End', 2]] as const) {
+      pressFocused(key)
+      await state.pending
+      flushSync()
+      expect(state.activeKind).toBe('image')
+      expect(state.selectedItem?.id).toBe(images[index]!.id)
+      expect(host.querySelector('.preview-image')?.getAttribute('src')).toBe(sources[index])
+    }
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    pressFocused('Enter')
+    await state.pending
+    expect(fake.copyCalls).toEqual([images[2]!.id])
+    state.dispose()
+  })
+
+  it('returns focus immediately and does not steal it back when filtering finishes later', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1, { kind: 'image' })] })
+    const state = await render(fake)
+    const picker = host.querySelector<HTMLSelectElement>('[aria-label="Filter by type"]')!
+    fake.deferred = true
+    picker.focus()
+    picker.value = 'image'
+    picker.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(document.activeElement).toBe(host.querySelector('[data-testid="search"]'))
+    const button = host.querySelector<HTMLButtonElement>('[aria-label="Preview on right"]')!
+    button.focus()
+    fake.deferred = false
+    fake.pending[0]!()
+    await state.pending
+    flushSync()
+    expect(document.activeElement).toBe(button)
     state.dispose()
   })
 
@@ -194,6 +340,19 @@ describe('content type filters', () => {
 })
 
 describe('the virtualised result list', () => {
+  it('returns keyboard navigation from a row action to the list before Enter copies', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+    host.querySelector<HTMLButtonElement>('.row-view')!.focus()
+    pressFocused('ArrowDown')
+    await state.pending
+    expect(document.activeElement).toBe(host.querySelector('[data-testid="search"]'))
+    pressFocused('Enter')
+    await state.pending
+    expect(fake.copyCalls).toEqual([testItemId(1)])
+    state.dispose()
+  })
+
   it('renders a bounded window of rows for 500 items, not 500 rows', async () => {
     const fake = createFakeApi({ items: Array.from({ length: 500 }, (_, i) => makeItem(i)) })
     const state = await render(fake)
@@ -609,11 +768,15 @@ describe('the props shape', () => {
       ontag: true,
       ontitle: true,
       ondelete: true,
+      ondragstart: true,
+      ondragend: true,
     }
     expect(Object.keys(propKeys).sort()).toEqual([
       'item',
       'nowMs',
       'ondelete',
+      'ondragend',
+      'ondragstart',
       'onpick',
       'onpin',
       'ontag',
@@ -717,6 +880,67 @@ describe('title editing', () => {
 })
 
 describe('tabs', () => {
+  it('offers existing tabs as clickable choices and shows current membership', async () => {
+    const fake = createFakeApi({ items: [
+      makeItem(0, { tags: ['home'] }), makeItem(1, { tags: ['work'] }),
+    ] })
+    const state = await render(fake)
+    press('t', { metaKey: true })
+    expect(host.querySelector('[aria-label="Remove from home"]')?.getAttribute('aria-pressed')).toBe('true')
+    const work = host.querySelector<HTMLButtonElement>('[aria-label="Add to work"]')!
+    expect(work).not.toBeNull()
+    work.click()
+    await state.pending
+    flushSync()
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work', tagged: true }])
+    expect(host.querySelector('[aria-label="Remove from work"]')?.getAttribute('aria-pressed')).toBe('true')
+    expect(state.tagging).toBe(true)
+    expect(state.tagDraft).toBe('')
+    host.querySelector<HTMLButtonElement>('[aria-label="Done tagging"]')!.click()
+    flushSync()
+    expect(state.tagging).toBe(false)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+  })
+
+  it('keeps tab choices attached to the original clip when selection changes', async () => {
+    const fake = createFakeApi({ items: [
+      makeItem(0, { tags: ['home'] }), makeItem(1, { tags: ['work'] }),
+    ] })
+    const state = await render(fake)
+    press('t', { metaKey: true })
+    state.selectedIndex = 1
+    flushSync()
+    host.querySelector<HTMLButtonElement>('[aria-label="Remove from home"]')!.click()
+    await state.pending
+    flushSync()
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'home', tagged: false }])
+    const work = host.querySelector<HTMLButtonElement>('[aria-label="Add to work"]')!
+    work.focus()
+    expect(pressFocused('ArrowDown').defaultPrevented).toBe(false)
+    expect(state.selectedIndex).toBe(1)
+    expect(document.activeElement).toBe(work)
+  })
+
+  it('keeps navigation keys in the tab-name editor so they cannot tag a different clip', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+    pressFocused('t', { metaKey: true })
+    const field = host.querySelector<HTMLInputElement>('[data-testid="tag-input"]')!
+    field.value = 'work'
+    field.dispatchEvent(new Event('input', { bubbles: true }))
+    for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End']) {
+      expect(pressFocused(key).defaultPrevented).toBe(false)
+      expect(state.selectedIndex).toBe(0)
+      expect(document.activeElement).toBe(field)
+    }
+    pressFocused('Enter')
+    await state.pending
+    expect(fake.tagCalls).toEqual([{ id: testItemId(0), tag: 'work', tagged: true }])
+    expect(fake.copyCalls).toEqual([])
+    state.dispose()
+  })
+
   it('always offers All and Pinned, and one tab per tag in use', async () => {
     const fake = createFakeApi({
       items: [makeItem(0, { tags: ['work'] }), makeItem(1, { pinned: true }), makeItem(2)],

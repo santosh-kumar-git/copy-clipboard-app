@@ -178,6 +178,7 @@ describe('AgentResultSchema', () => {
     expect(methods).toEqual([
       'hello', 'hotkey.register', 'hotkey.unregister', 'read', 'shutdown',
       'watch.start', 'watch.stop', 'write',
+      'write.abort', 'write.begin', 'write.chunk', 'write.commit',
     ])
   })
 
@@ -196,5 +197,35 @@ describe('AgentResultSchema', () => {
   it('hotkey.register returns a boolean `bound`, never an error — a dead hotkey is a state', () => {
     expect(AgentResultSchema['hotkey.register'].parse({ bound: false, accelerator: 'Cmd+Shift+V' }))
       .toEqual({ bound: false, accelerator: 'Cmd+Shift+V' })
+  })
+})
+
+describe('bounded write upload schemas', () => {
+  const begin = {
+    v: 1, t: 'req', id: '1', method: 'write.begin',
+    params: { transferId: 'upload', transient: false, reps: [
+      { mime: 'image/png', uti: 'public.png', byteLength: 1_048_576, sha256: inlineRep.sha256 },
+    ] },
+  }
+  it('accepts metadata without transporting a representation in the declaration', () => {
+    expect(AgentRequestSchema.safeParse(begin).success).toBe(true)
+  })
+  it('caps rep count, per-rep size, aggregate size and chunk size', () => {
+    const rep = begin.params.reps[0]!
+    for (const reps of [
+      Array.from({ length: 9 }, () => rep),
+      [{ ...rep, byteLength: MAX_REP_BYTES + 1 }],
+      Array.from({ length: 4 }, () => ({ ...rep, byteLength: MAX_REP_BYTES })),
+    ]) {
+      expect(AgentRequestSchema.safeParse({ ...begin, params: { ...begin.params, reps } }).success).toBe(false)
+    }
+    const chunk = { v: 1, t: 'req', id: '2', method: 'write.chunk',
+      params: { transferId: 'upload', repIndex: 0, seq: 0, b64: Buffer.alloc(32_768).toString('base64') } }
+    expect(AgentRequestSchema.safeParse(chunk).success).toBe(true)
+    for (const size of [32_769, 32_770]) {
+      expect(AgentRequestSchema.safeParse({ ...chunk, params: {
+        ...chunk.params, b64: Buffer.alloc(size).toString('base64'),
+      } }).success).toBe(false)
+    }
   })
 })

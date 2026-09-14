@@ -17,6 +17,10 @@ enum AgentMethod: String, Codable, Equatable, Sendable, CaseIterable {
     case watchStop = "watch.stop"
     case read = "read"
     case write = "write"
+    case writeBegin = "write.begin"
+    case writeChunk = "write.chunk"
+    case writeCommit = "write.commit"
+    case writeAbort = "write.abort"
     case hotkeyRegister = "hotkey.register"
     case hotkeyUnregister = "hotkey.unregister"
     case shutdown = "shutdown"
@@ -65,6 +69,7 @@ struct AgentCapabilities: Codable, Equatable, Sendable {
     var agent: AgentCapabilitiesAgent
     var agentVersion: String
     var chunkThresholdBytes: Int
+    var chunkedWrite: Bool?
     var clipboardWatch: AgentCapabilitiesClipboardWatch
     var concealedTypeHints: Bool
     var focusApp: Bool
@@ -226,6 +231,50 @@ struct WatchStopParams: Codable, Equatable, Sendable {}
 
 struct WatchStopResult: Codable, Equatable, Sendable {
     var watching: Bool
+}
+
+struct WriteAbortParams: Codable, Equatable, Sendable {
+    var transferId: String
+}
+
+struct WriteAbortResult: Codable, Equatable, Sendable {
+    var aborted: Bool
+}
+
+struct WriteBeginParams: Codable, Equatable, Sendable {
+    var reps: [WriteBeginParamsRepsItem]
+    var transferId: String
+    var transient: Bool
+}
+
+struct WriteBeginParamsRepsItem: Codable, Equatable, Sendable {
+    var byteLength: Int
+    var mime: String
+    var sha256: String
+    var uti: String?
+}
+
+struct WriteBeginResult: Codable, Equatable, Sendable {
+    var accepted: Bool
+}
+
+struct WriteChunkParams: Codable, Equatable, Sendable {
+    var b64: Data
+    var repIndex: Int
+    var seq: Int
+    var transferId: String
+}
+
+struct WriteChunkResult: Codable, Equatable, Sendable {
+    var accepted: Bool
+}
+
+struct WriteCommitParams: Codable, Equatable, Sendable {
+    var transferId: String
+}
+
+struct WriteCommitResult: Codable, Equatable, Sendable {
+    var changeToken: String
 }
 
 struct WriteParams: Codable, Equatable, Sendable {

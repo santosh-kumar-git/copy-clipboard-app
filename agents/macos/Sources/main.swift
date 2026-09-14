@@ -3,6 +3,7 @@ import Carbon
 import Foundation
 
 let AGENT_VERSION = "0.1.0"
+let writeUpload = WriteUpload()
 
 // Writing to a dead stdout must return EPIPE rather than killing us with a signal, so the exit path
 // is ours and is logged.
@@ -125,6 +126,7 @@ func capabilities() -> AgentCapabilities {
     agent: .macos,
     agentVersion: AGENT_VERSION,
     chunkThresholdBytes: CHUNK_THRESHOLD_BYTES,
+    chunkedWrite: true,
     clipboardWatch: .changecountPoll,
     concealedTypeHints: true,
     focusApp: true,
@@ -210,18 +212,11 @@ func handle(line: Data) {
     Out.ok(id: id, ReadResult(changeCount: outcome.changeCount, hints: outcome.hints, reps: outcome.reps))
     Chunker.emit(outcome.streams)
 
-  case "write":
-    // `WriteParamsRepsItem.b64` is `Data`, so a b64 field that is not valid base64 fails the decode
-    // here and is answered E_BAD_PARAMS. That is why the agent has no `write.bad-base64` log id.
-    guard let p = decodeParams(line, WriteParams.self), !p.reps.isEmpty else {
-      return Out.fail(id: id, code: "E_BAD_PARAMS",
-                      message: "write needs at least one rep with a valid base64 b64")
-    }
+  case "write", "write.begin", "write.chunk", "write.commit", "write.abort":
     Pasteboard.queue.async {
-      let token = Writer.write(reps: p.reps, transient: p.transient)
-      // The poll WILL see this changeCount and emit clipboard.changed for it. That is deliberate:
-      // suppression is the host's job, keyed on the token we return here, and a transcript proves it.
-      Out.ok(id: id, WriteResult(changeToken: String(token)))
+      handleWriteRequest(line: line, id: id, method: head.method, upload: writeUpload) { params in
+        String(Writer.write(reps: params.reps, transient: params.transient))
+      }
     }
 
   case "hotkey.register":
@@ -260,6 +255,10 @@ NSApp.setActivationPolicy(.prohibited)
 
 Frontmost.startObserving()
 ReadWatchdog.start()
+let writeExpiryTimer = DispatchSource.makeTimerSource(queue: Pasteboard.queue)
+writeExpiryTimer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+writeExpiryTimer.setEventHandler { writeUpload.expire() }
+writeExpiryTimer.activate()
 
 // Sleep and fast-user-switch both mean "nobody is copying anything right now". Observed on main and
 // marshalled onto the pasteboard queue, per spec §4's thread discipline.

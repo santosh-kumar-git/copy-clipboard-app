@@ -59,6 +59,25 @@ describe('createSearchIndex — matching', () => {
     expect(ix.size).toBe(2)
     expect([...ix.debugHaystack()].sort()).toEqual(['first', 'second'])
   })
+
+  it('keeps quoted phrases exact and contractions attached while allowing subsequence gaps', () => {
+    const ix = createSearchIndex()
+    ix.add(e({ id: 'EXACT', preview: "we can't ship a+b", ord: 1 }))
+    ix.add(e({ id: 'GAPS', preview: "we can x 't ship a x + x b", ord: 2 }))
+    expect(ix.query('"a+b"', 10).map((hit) => hit.id)).toEqual(['EXACT'])
+    expect(ix.query("can't", 10).map((hit) => hit.id)).toEqual(['EXACT'])
+    expect(ix.query('ship ab', 10).map((hit) => hit.id)).toEqual(['EXACT', 'GAPS'])
+  })
+
+  it('preserves negative searches without treating exclusion text as a regular expression', () => {
+    const ix = createSearchIndex()
+    ix.add(e({ id: 'NEW', preview: 'warehouse new', ord: 1 }))
+    ix.add(e({ id: 'OLD', preview: 'warehouse old', ord: 2 }))
+    ix.add(e({ id: 'PLUS', preview: 'warehouse a+b', ord: 3 }))
+    expect(ix.query('warehouse -old', 10).map((hit) => hit.id)).toEqual(['PLUS', 'NEW'])
+    expect(ix.query('-old', 10).map((hit) => hit.id)).toEqual(['PLUS', 'NEW'])
+    expect(ix.query('-a+b', 10).map((hit) => hit.id)).toEqual(['OLD', 'NEW'])
+  })
 })
 
 describe('createSearchIndex — ordering and lifecycle', () => {

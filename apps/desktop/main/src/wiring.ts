@@ -15,7 +15,6 @@ import {
   type Result,
   type ResolvedRep,
   type Unsub,
-  WATCH_INTERVAL_MS,
 } from '@cairn/protocol'
 import type { Capture } from '@cairn/capture'
 import type { History } from '@cairn/history'
@@ -143,6 +142,9 @@ export function composeApp(deps: ComposeDeps): CairnApp {
 
   let config = deps.config
   let stopped = false
+  let stopping: Promise<void> | null = null
+  let pendingIngest: Promise<void> = Promise.resolve()
+  let unsubscribeCandidates: Unsub = () => {}
   let unregisterIpc: Unsub = () => {}
   let cancelIdleTick: Cancel = () => {}
   let evictedWhileIdle = false
@@ -220,6 +222,10 @@ export function composeApp(deps: ComposeDeps): CairnApp {
 
   const evictPreviewCache = (reason: EvictReason): void => {
     history.evictPreviewCache()
+    paletteOpening += 1
+    palette.hide()
+    // Eviction must scrub renderer memory even when native hide is already a no-op.
+    sendIpcEvent(paletteTarget, 'cairn:palette.hidden', {}, logger)
     logger.info(
       reason === 'lock'
         ? 'preview-cache.evicted-lock'
@@ -375,16 +381,19 @@ export function composeApp(deps: ComposeDeps): CairnApp {
 
       // 1. The agent: nothing else in M1 works without it.
       await agent.start()
-      await agent.request('watch.start', { intervalMs: WATCH_INTERVAL_MS })
 
       // 2. Capture -> privacy -> history -> search. `capture` emits at most one Candidate per
       //    clipboard change and has already applied the privacy layer's `skip` decision.
       // The parameter is annotated on purpose: `Candidate` is imported as a type above, and with
       // `noUnusedLocals: true` an inferred callback parameter would make that import an unused-local
       // error (TS6133) now that there is no local `CapturePort` declaration mentioning it.
-      capture.onCandidate((candidate: Candidate) => {
-        void history.ingest(candidate).then(async (r) => {
-          if (!r.ok) return
+      unsubscribeCandidates = capture.onCandidate((candidate: Candidate) => {
+        pendingIngest = pendingIngest.then(async () => {
+          const r = await history.ingest(candidate)
+          if (!r.ok) {
+            logger.error('history.ingested', { ok: false, code: r.code })
+            return
+          }
           // Enforce the limit on every ingest, which is the only moment the count can EXCEED it.
           // Until now nothing ever called evictNow(): the three retention limits were configurable,
           // validated, and completely inert, so history grew without bound and an expired secret's
@@ -392,12 +401,15 @@ export function composeApp(deps: ComposeDeps): CairnApp {
           await enforceRetention()
           const total = history.list({ limit: 1, offset: 0 }).total
           sendIpcEvent(paletteTarget, 'cairn:history.changed', { reason: 'ingest', total }, logger)
+        }).catch(() => {
+          logger.error('history.ingested', { ok: false, code: 'E_INTERNAL' })
         })
       })
       history.onChange((e) => {
         sendIpcEvent(paletteTarget, 'cairn:history.changed', { reason: e.reason, total: e.total }, logger)
       })
-      await capture.start()
+      const watching = await capture.start()
+      if (!watching.ok) return watching
 
       // 3. The first-run hotkey step (spec §9). Asked once, then persisted, and the default is
       //    pre-selected — but the dialog NAMES what Cmd+Shift+V overrides.
@@ -464,25 +476,24 @@ export function composeApp(deps: ComposeDeps): CairnApp {
       return ok({ accelerator, hotkeyStatus: status })
     },
 
-    async stop() {
-      if (stopped) return
+    stop() {
+      if (stopping !== null) return stopping
       stopped = true
-      logger.info('app.quitting')
-      cancelIdleTick()
-      unregisterIpc()
-      await hotkey.unbind()
-      // AWAITED, both of them. `Capture.stop()` is `Promise<void>`; `whenIdle()` resolves once no
-      // candidate is mid-assembly. Firing and forgetting either one leaves a half-assembled rep
-      // holding clipboard bytes in memory past the line below that zero-fills the key — the exact
-      // leak security invariant 1 exists to prevent.
-      await capture.stop()
-      await capture.whenIdle()
-      await agent.dispose()
-      // Spec §11 control 6, in order: the master key Buffer is zero-filled, then the store zero-fills
-      // the derived blob name subkey. Both, or the second one stays live in a Buffer for the rest of
-      // the process image.
-      keyring.lock()
-      store.close()
+      stopping = (async () => {
+        logger.info('app.quitting')
+        cancelIdleTick()
+        unregisterIpc()
+        await hotkey.unbind()
+        await capture.stop()
+        await capture.whenIdle()
+        unsubscribeCandidates()
+        // Capture's idle promise ends at emission; persistence has its own queue to drain.
+        await pendingIngest
+        await agent.dispose()
+        keyring.lock()
+        store.close()
+      })()
+      return stopping
     },
 
     evictPreviewCache,

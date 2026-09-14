@@ -1,5 +1,7 @@
 import * as z from 'zod'
-import { CHUNK_THRESHOLD_BYTES, MAX_REP_BYTES, WIRE_MAJOR } from './constants'
+import {
+  CHUNK_PAYLOAD_BYTES, CHUNK_THRESHOLD_BYTES, MAX_REP_BYTES, MAX_WRITE_BYTES, MAX_WRITE_REPS, WIRE_MAJOR,
+} from './constants'
 
 export const ContentHashSchema = z
   .string()
@@ -46,6 +48,7 @@ export const AgentCapabilitiesSchema = z.object({
   concealedTypeHints: z.boolean(),
   maxRepBytes: z.int().positive(),
   chunkThresholdBytes: z.int().positive(),
+  chunkedWrite: z.boolean().optional(),
   missingTools: z.array(z.string()).default([]),
 })
 
@@ -75,6 +78,24 @@ export const AgentRequestSchema = z.discriminatedUnion('method', [
       transient: z.boolean(),
     }),
   ),
+  req('write.begin', z.object({
+    transferId: IdSchema,
+    transient: z.boolean(),
+    reps: z.array(z.object({
+      mime: MimeSchema, uti: z.string().max(255).nullable().default(null),
+      byteLength: z.int().min(0).max(MAX_REP_BYTES), sha256: ContentHashSchema,
+    })).min(1).max(MAX_WRITE_REPS)
+      .refine((reps) => reps.reduce((sum, rep) => sum + rep.byteLength, 0) <= MAX_WRITE_BYTES),
+  })),
+  req('write.chunk', z.object({
+    transferId: IdSchema,
+    repIndex: z.int().min(0).max(MAX_WRITE_REPS - 1),
+    seq: z.int().min(0),
+    b64: z.base64().max(Math.ceil(CHUNK_PAYLOAD_BYTES / 3) * 4).refine((value) =>
+      value.length / 4 * 3 - (value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0) <= CHUNK_PAYLOAD_BYTES),
+  })),
+  req('write.commit', z.object({ transferId: IdSchema })),
+  req('write.abort', z.object({ transferId: IdSchema })),
   req('hotkey.register', z.object({ accelerator: z.string().min(1).max(64) })),
   req('hotkey.unregister', z.object({})),
   req('shutdown', z.object({})),
@@ -91,6 +112,10 @@ export const AgentResultSchema = {
     reps: z.array(RepSchema),
   }),
   write: z.object({ changeToken: z.string().min(1) }),
+  'write.begin': z.object({ accepted: z.literal(true) }),
+  'write.chunk': z.object({ accepted: z.literal(true) }),
+  'write.commit': z.object({ changeToken: z.string().min(1) }),
+  'write.abort': z.object({ aborted: z.boolean() }),
   'hotkey.register': z.object({ bound: z.boolean(), accelerator: z.string() }),
   'hotkey.unregister': z.object({ bound: z.literal(false) }),
   shutdown: z.object({ bye: z.literal(true) }),

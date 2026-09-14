@@ -28,13 +28,129 @@ struct SelfTest {
 
   static func main() {
     let args = Array(CommandLine.arguments.dropFirst())
+    if args.first == "--write-agent" {
+      runSyntheticWriteAgent()
+      return
+    }
     if args.first == "--mark" {
       mark(args.count > 1 ? args[1] : "")
       return
     }
     runAssertions()
+    runWriteUploadAssertions()
     print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
+  }
+
+  static func runSyntheticWriteAgent() {
+    signal(SIGPIPE, SIG_IGN)
+    let upload = WriteUpload()
+    var writes = 0
+    In.readLines { line in
+      guard let head = try? JSONDecoder().decode(RequestHead.self, from: line) else { return }
+      switch head.method {
+      case "hello":
+        Out.ok(id: head.id, AgentCapabilities(
+          agent: .macos, agentVersion: "synthetic", chunkThresholdBytes: CHUNK_THRESHOLD_BYTES,
+          chunkedWrite: true, clipboardWatch: .none, concealedTypeHints: true,
+          focusApp: false, hotkey: .none, maxRepBytes: MAX_REP_BYTES, missingTools: [],
+          paste: AgentCapabilitiesPaste.none, platformVersion: "synthetic", tier: .a, wireMajor: protocolVersion))
+      case "read":
+        Out.ok(id: head.id, ReadResult(changeCount: writes, hints: [], reps: []))
+      case "shutdown":
+        Out.ok(id: head.id, ShutdownResult(bye: true))
+        exit(0)
+      default:
+        handleWriteRequest(line: line, id: head.id, method: head.method, upload: upload) { params in
+          writes += 1
+          return params.reps.map { "\($0.mime)|\($0.uti ?? "")|\(contentHash($0.b64))" }.joined(separator: ",")
+            + "|\(params.transient)"
+        }
+      }
+    }
+  }
+
+  static func runWriteUploadAssertions() {
+    let bytes = Data(repeating: 0x5A, count: 1_048_576)
+    let descriptor = WriteBeginParamsRepsItem(byteLength: bytes.count, mime: "image/png",
+                                             sha256: contentHash(bytes), uti: "public.png")
+    func begin(_ reps: [WriteBeginParamsRepsItem] = [descriptor]) -> WriteBeginParams {
+      WriteBeginParams(reps: reps, transferId: "upload", transient: false)
+    }
+    func expectError(_ code: String, _ label: String, _ operation: () throws -> Void) {
+      do { try operation(); expect(false, label) }
+      catch let error as WriteUploadError { expectEqual(error.code, code, label) }
+      catch { expect(false, label) }
+    }
+    do {
+      let upload = WriteUpload()
+      try upload.begin(begin())
+      for (seq, chunk) in Chunker.split(bytes).enumerated() {
+        try upload.append(WriteChunkParams(b64: chunk, repIndex: 0, seq: seq, transferId: "upload"))
+      }
+      let result = try upload.commit(WriteCommitParams(transferId: "upload"))
+      expectEqual(result.reps.map(\.b64), [bytes], "large writes reassemble byte-for-byte before commit")
+      expectEqual(result.reps.first?.uti, "public.png", "large writes preserve their representation type")
+      expect(!result.transient, "large recalls remain on the clipboard for manual paste")
+      expectError("E_REP_UNKNOWN_ID", "a completed write cannot be committed twice") {
+        _ = try upload.commit(WriteCommitParams(transferId: "upload"))
+      }
+    } catch { expect(false, "a valid 1 MiB upload commits") }
+
+    let upload = WriteUpload()
+    expectError("E_REP_TOO_MANY", "write rep count is bounded") { try upload.begin(begin(Array(repeating: descriptor, count: 9))) }
+    var oversized = descriptor
+    oversized.byteLength = MAX_REP_BYTES + 1
+    expectError("E_REP_OVERFLOW", "a write declaration cannot exceed the rep cap") { try upload.begin(begin([oversized])) }
+    oversized.byteLength = MAX_REP_BYTES
+    expectError("E_REP_OVERFLOW", "aggregate write bytes are bounded") { try upload.begin(begin(Array(repeating: oversized, count: 4))) }
+    do {
+      try upload.begin(begin())
+      expectError("E_REP_TOO_MANY", "only one upload may hold bytes") { try upload.begin(begin()) }
+      expectError("E_REP_SHORT", "an incomplete upload cannot commit") { _ = try upload.commit(WriteCommitParams(transferId: "upload")) }
+      try upload.begin(begin())
+      expectError("E_REP_SEQ_GAP", "out-of-order chunks discard the transfer") {
+        try upload.append(WriteChunkParams(b64: Data([1]), repIndex: 0, seq: 1, transferId: "upload"))
+      }
+      expectError("E_REP_UNKNOWN_ID", "a malformed upload cannot subsequently commit") {
+        _ = try upload.commit(WriteCommitParams(transferId: "upload"))
+      }
+      try upload.begin(begin())
+      expectError("E_REP_OVERFLOW", "each chunk is bounded to 32 KiB") {
+        try upload.append(WriteChunkParams(b64: Data(repeating: 0, count: 32_769), repIndex: 0, seq: 0, transferId: "upload"))
+      }
+      var wrongHash = descriptor
+      wrongHash.byteLength = 1
+      try upload.begin(begin([wrongHash]))
+      try upload.append(WriteChunkParams(b64: Data([1]), repIndex: 0, seq: 0, transferId: "upload"))
+      expectError("E_REP_HASH_MISMATCH", "hash mismatch prevents a clipboard commit") {
+        _ = try upload.commit(WriteCommitParams(transferId: "upload"))
+      }
+      try upload.begin(begin())
+      expect(upload.abort(WriteAbortParams(transferId: "upload")), "an upload can be aborted")
+      expectError("E_REP_UNKNOWN_ID", "aborted bytes cannot be committed") { _ = try upload.commit(WriteCommitParams(transferId: "upload")) }
+    } catch { expect(false, "upload failure cases can recover") }
+
+    var now = 0
+    let expiring = WriteUpload(now: { now })
+    do {
+      try expiring.begin(begin())
+      now = 5_000
+      expiring.expire()
+      expectError("E_REP_UNKNOWN_ID", "idle uploads expire without clipboard access") {
+        _ = try expiring.commit(WriteCommitParams(transferId: "upload"))
+      }
+      try expiring.begin(begin())
+      for seq in 0..<7 {
+        now += 4_000
+        try expiring.append(WriteChunkParams(b64: Data([1]), repIndex: 0, seq: seq, transferId: "upload"))
+      }
+      now += 2_000
+      expiring.expire()
+      expectError("E_REP_UNKNOWN_ID", "uploads have an absolute deadline despite continued activity") {
+        _ = try expiring.commit(WriteCommitParams(transferId: "upload"))
+      }
+    } catch { expect(false, "expired uploads release their slot") }
   }
 
   static func runAssertions() {
@@ -97,6 +213,12 @@ struct SelfTest {
     var guardSplitter = LineSplitter()
     _ = guardSplitter.push(Data(repeating: 0x41, count: MAX_LINE_BYTES + 1))
     expectEqual(guardSplitter.droppedOverlongLines, 1, "an unterminated line over 1 MiB is dropped, not buffered")
+    _ = guardSplitter.push(Data(repeating: 0x42, count: MAX_LINE_BYTES + 1))
+    expectEqual(guardSplitter.droppedOverlongLines, 1, "one oversized line is counted once across chunks")
+    expectEqual(
+      guardSplitter.push(Data("{\"tail\":true}\n{\"next\":true}\n".utf8)).map { String(decoding: $0, as: UTF8.self) },
+      ["{\"next\":true}"],
+      "the tail of an oversized line is discarded through its newline")
     var emptySplitter = LineSplitter()
     expectEqual(emptySplitter.push(Data("\n\n".utf8)).count, 0, "empty lines are ignored")
 

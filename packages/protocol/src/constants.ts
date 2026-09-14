@@ -27,6 +27,9 @@ export const MAX_REP_BYTES = 20_971_520
 export const MAX_LINE_BYTES = 1_048_576
 export const REP_STREAM_TIMEOUT_MS = 5_000
 export const MAX_CONCURRENT_REP_STREAMS = 8
+export const MAX_WRITE_REPS = 8
+export const MAX_WRITE_BYTES = 64 * 1024 * 1024
+export const WRITE_TRANSFER_TIMEOUT_MS = 30_000
 
 /** Behaviour (§5.7). */
 export const DEFAULT_ACCELERATOR = 'Cmd+Shift+V'

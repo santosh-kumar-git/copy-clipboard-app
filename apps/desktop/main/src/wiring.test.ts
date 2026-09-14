@@ -185,7 +185,7 @@ function build(over: {
   })
 
   return {
-    app, clock, agentRequests, hotkeyListeners, candidateCbs, suppressed, captureCalls,
+    app, clock, agent, capture, history, palette, agentRequests, hotkeyListeners, candidateCbs, suppressed, captureCalls,
     ingested, sent, paletteCalls, registered, powerHandlers, saved,
     fireHotkey: () => { for (const l of hotkeyListeners) l({ accelerator: 'Cmd+Shift+V', focusToken: 'tok', firedAt: 1 }) },
     setIdle: (s: number) => { idleSeconds = s },
@@ -200,6 +200,28 @@ function build(over: {
 }
 
 describe('start', () => {
+  it('returns a watch failure instead of reporting the app ready', async () => {
+    const h = build()
+    vi.spyOn(h.capture, 'start').mockResolvedValue(err('E_AGENT_EXIT', 'watch failed'))
+    const result = await h.app.start()
+    expect(result).toEqual(err('E_AGENT_EXIT', 'watch failed'))
+    expect(h.agentRequests.some((r) => r.method === 'hotkey.register')).toBe(false)
+    await h.app.stop()
+  })
+
+  it('lets capture subscribe before the only watch.start request', async () => {
+    const h = build()
+    const captureStart = vi.spyOn(h.capture, 'start').mockImplementation(async () => {
+      expect(h.agentRequests.filter((r) => r.method === 'watch.start')).toHaveLength(0)
+      await h.agent.request('watch.start', { intervalMs: 500 })
+      return ok({ intervalMs: 500 })
+    })
+    expect((await h.app.start()).ok).toBe(true)
+    expect(captureStart).toHaveBeenCalledOnce()
+    expect(h.agentRequests.filter((r) => r.method === 'watch.start')).toHaveLength(1)
+    await h.app.stop()
+  })
+
   it('starts the agent, starts capture, binds the configured hotkey and registers the IPC channels', async () => {
     const h = build()
     const r = await h.app.start()
@@ -605,6 +627,51 @@ describe('previewText', () => {
 })
 
 describe('preview cache eviction (spec §11 control 6)', () => {
+  it.each(['lock', 'suspend', 'idle'] as const)('hides and scrubs the renderer on %s', async (reason) => {
+    const h = build()
+    await h.app.start()
+    h.app.showPalette()
+    h.sent.length = 0
+    if (reason === 'idle') {
+      h.setIdle(301)
+      h.clock.advance(60_000)
+    } else {
+      h.powerHandlers.get(reason === 'lock' ? 'lock-screen' : 'suspend')!()
+    }
+    expect(h.palette.isVisible()).toBe(false)
+    expect(h.previewsEvicted).toBe(true)
+    expect(h.sent).toEqual([['cairn:palette.hidden', {}]])
+    await h.app.stop()
+  })
+
+  it.each(['lock', 'suspend', 'idle'] as const)('sends a %s scrub even when the palette is already hidden', async (reason) => {
+    const h = build()
+    await h.app.start()
+    h.sent.length = 0
+    h.app.evictPreviewCache(reason)
+    expect(h.paletteCalls).toEqual(['hide'])
+    expect(h.palette.isVisible()).toBe(false)
+    expect(h.sent).toEqual([['cairn:palette.hidden', {}]])
+    await h.app.stop()
+  })
+
+  it('does not announce a pending opening after cache eviction cancels it', async () => {
+    const h = build({ previewsEvicted: true })
+    let finishReload!: (result: Awaited<ReturnType<History['load']>>) => void
+    const reloading = new Promise<Awaited<ReturnType<History['load']>>>((resolve) => { finishReload = resolve })
+    vi.spyOn(h.history, 'load').mockReturnValue(reloading)
+    await h.app.start()
+    h.sent.length = 0
+    h.app.showPalette()
+    h.app.evictPreviewCache('lock')
+    finishReload(ok({ items: 1 }))
+    await reloading
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(h.palette.isVisible()).toBe(false)
+    expect(h.sent).toEqual([['cairn:palette.hidden', {}]])
+    await h.app.stop()
+  })
+
   it('evicts on screen lock', async () => {
     const h = build()
     await h.app.start()
@@ -702,6 +769,53 @@ describe('securityStatus', () => {
 })
 
 describe('stop', () => {
+  it('drains captured history writes before closing the store, including repeated stop callers', async () => {
+    const h = build()
+    let finishWrite!: (result: Awaited<ReturnType<History['ingest']>>) => void
+    const write = new Promise<Awaited<ReturnType<History['ingest']>>>((resolve) => { finishWrite = resolve })
+    vi.spyOn(h.history, 'ingest').mockReturnValue(write)
+    await h.app.start()
+    h.candidateCbs[0]!({
+      reps: [rep('text/plain', 'pending copy')], kind: 'text', contentHash: HASH,
+      primaryText: 'pending copy', hints: [], sourceApp: null, thumbnailJpeg: null,
+      changeToken: 'pending', capturedAt: 1,
+    })
+    let firstDone = false
+    let secondDone = false
+    const first = h.app.stop().then(() => { firstDone = true })
+    const second = h.app.stop().then(() => { secondDone = true })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    try {
+      expect(firstDone).toBe(false)
+      expect(secondDone).toBe(false)
+      expect(h.storeCloses).toBe(0)
+      expect(h.keyringLocked).toBe(0)
+    } finally {
+      finishWrite(ok({ outcome: 'skipped', reason: 'synthetic' }))
+      await Promise.all([first, second])
+    }
+    expect(h.storeCloses).toBe(1)
+    expect(h.keyringLocked).toBe(1)
+  })
+
+  it('continues capturing after a failed history write and drains the next one', async () => {
+    const h = build()
+    const ingest = vi.spyOn(h.history, 'ingest')
+      .mockRejectedValueOnce(new Error('synthetic failed write'))
+      .mockResolvedValueOnce(ok({ outcome: 'skipped', reason: 'synthetic' }))
+    await h.app.start()
+    const candidate: Candidate = {
+      reps: [rep('text/plain', 'next copy')], kind: 'text', contentHash: HASH,
+      primaryText: 'next copy', hints: [], sourceApp: null, thumbnailJpeg: null,
+      changeToken: 'next', capturedAt: 1,
+    }
+    h.candidateCbs[0]!(candidate)
+    h.candidateCbs[0]!({ ...candidate, changeToken: 'after-error' })
+    await h.app.stop()
+    expect(ingest).toHaveBeenCalledTimes(2)
+    expect(h.storeCloses).toBe(1)
+  })
+
   it('unbinds the hotkey, stops capture, disposes the agent and zeroes the master key', async () => {
     const h = build()
     await h.app.start()

@@ -8,8 +8,16 @@ import {
   CHUNK_THRESHOLD_BYTES,
   MAX_LINE_BYTES,
   MAX_REP_BYTES,
+  MAX_WRITE_BYTES,
+  MAX_WRITE_REPS,
+  REP_STREAM_TIMEOUT_MS,
+  WRITE_TRANSFER_TIMEOUT_MS,
   WATCH_INTERVAL_MS,
+  contentHash,
+  systemClock,
+  type Logger,
 } from '@cairn/protocol'
+import { spawnAgent } from '@cairn/agent-host'
 import { describe, expect, it } from 'vitest'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -57,6 +65,35 @@ describe.runIf(process.platform === 'darwin')('macOS agent Swift self-test', () 
     expect(failed, output).toEqual([])
     expect(output.trimEnd().endsWith('ALL PASS')).toBe(true)
   }, 330_000)
+
+  it('streams multiple large reps through the native request handler with a synthetic clipboard writer', async () => {
+    const logger = { log() {}, debug() {}, info() {}, warn() {}, error() {} } as Logger
+    const agent = spawnAgent({ platform: 'macos', binPath: SELFTEST_BIN, args: ['--write-agent'],
+      clock: systemClock, logger, maxRestarts: 0 })
+    try {
+      const caps = await agent.start()
+      expect(caps.chunkedWrite).toBe(true)
+      const png = Buffer.alloc(1_048_576, 0x5a)
+      const text = Buffer.alloc(900_000, 0x41)
+      expect(await agent.request('write', { transient: false, reps: [
+        { mime: 'image/png', uti: 'public.png', b64: png.toString('base64') },
+        { mime: 'text/plain', uti: null, b64: text.toString('base64') },
+      ] })).toEqual({ ok: true, value: {
+        changeToken: `image/png|public.png|${contentHash(png)},text/plain||${contentHash(text)}|false`,
+      } })
+      expect(await agent.request('read', { changeCount: 0 })).toMatchObject({ ok: true, value: { changeCount: 1 } })
+      expect(await agent.request('write.begin', {
+        transferId: 'corrupt', transient: false,
+        reps: [{ mime: 'text/plain', uti: null, byteLength: 1, sha256: contentHash(Buffer.from('x')) }],
+      })).toMatchObject({ ok: true })
+      await agent.request('write.chunk', { transferId: 'corrupt', repIndex: 0, seq: 0, b64: 'eQ==' })
+      expect(await agent.request('write.commit', { transferId: 'corrupt' }))
+        .toMatchObject({ ok: false, code: 'E_REP_HASH_MISMATCH' })
+      expect(await agent.request('read', { changeCount: 0 })).toMatchObject({ ok: true, value: { changeCount: 1 } })
+    } finally {
+      await agent.dispose()
+    }
+  }, 30_000)
 })
 
 /**
@@ -73,6 +110,10 @@ it('the Swift agent declares the same numeric limits as @cairn/protocol', () => 
     ['CHUNK_THRESHOLD_BYTES', CHUNK_THRESHOLD_BYTES],
     ['CHUNK_PAYLOAD_BYTES', CHUNK_PAYLOAD_BYTES],
     ['MAX_REP_BYTES', MAX_REP_BYTES],
+    ['MAX_WRITE_BYTES', MAX_WRITE_BYTES],
+    ['MAX_WRITE_REPS', MAX_WRITE_REPS],
+    ['REP_STREAM_TIMEOUT_MS', REP_STREAM_TIMEOUT_MS],
+    ['WRITE_TRANSFER_TIMEOUT_MS', WRITE_TRANSFER_TIMEOUT_MS],
     ['MAX_LINE_BYTES', MAX_LINE_BYTES],
     ['AGENT_REQUEST_TIMEOUT_MS', AGENT_REQUEST_TIMEOUT_MS],
     ['WATCH_INTERVAL_MS', WATCH_INTERVAL_MS],

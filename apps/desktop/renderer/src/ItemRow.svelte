@@ -21,8 +21,10 @@
     ontag: () => void
     ontitle: () => void
     ondelete: () => void
+    ondragstart?: (event: DragEvent) => void
+    ondragend?: () => void
   }
-  let { item, selected, ranges, top, nowMs, onpick, onview, onpin, ontag, ontitle, ondelete }: Props = $props()
+  let { item, selected, ranges, top, nowMs, onpick, onview, onpin, ontag, ontitle, ondelete, ondragstart, ondragend }: Props = $props()
 
   const label = $derived(item.title ?? item.preview)
   const segments = $derived(highlightSegments(label, ranges))
@@ -50,12 +52,15 @@
   class:selected
   role="option"
   aria-selected={selected}
+  draggable={ondragstart !== undefined}
+  {ondragstart}
+  {ondragend}
   style="top: {top}px; height: {ROW_HEIGHT_PX}px"
   onclick={onpick}
 >
   <span class="chip" data-kind={item.kind}>{kindChipLabel(item.kind)}</span>
   {#if thumbnail !== null}
-    <img class="thumb" src={thumbnail} alt="" width="32" height="32" />
+    <img class="thumb" src={thumbnail} alt="" width="32" height="32" draggable="false" />
   {/if}
   {#if label.length === 0}
     <!-- An image has no text preview and, until thumbnails are actually served, no thumbnail
