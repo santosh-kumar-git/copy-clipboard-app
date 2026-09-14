@@ -5,6 +5,7 @@
   import Toast from './Toast.svelte'
   import {
     ALL_TAB,
+    KIND_FILTERS,
     PINNED_TAB,
     SHORTCUT_HINTS,
     PaletteState,
@@ -14,6 +15,7 @@
     hotkeyFailedText,
     sameTab,
     type ActiveTab,
+    type KindFilter,
     type NavKey,
   } from './palette-state.svelte'
 
@@ -28,6 +30,7 @@
   let listEl: HTMLDivElement | null = $state(null)
   let tagEl: HTMLInputElement | null = $state(null)
   let titleEl: HTMLInputElement | null = $state(null)
+  let previewLayout: 'bottom' | 'right' = $state('bottom')
 
   const selected = $derived(palette.selectedItem)
   const activeId = $derived(selected === null ? null : `cairn-row-${selected.id}`)
@@ -85,6 +88,7 @@
 
   function onKeyDown(event: KeyboardEvent): void {
     const key = event.key
+    if (event.target instanceof HTMLSelectElement && key !== 'Escape') return
     if (event.target instanceof HTMLButtonElement && (key === 'Enter' || key === ' ')) return
     if (key === 'Escape') {
       event.preventDefault()
@@ -162,7 +166,21 @@
       </svg>
       <span>Cairn</span>
     </div>
-    <span class="history-count">{palette.total} {palette.total === 1 ? 'clip' : 'clips'}</span>
+    <div class="header-tools">
+      <div class="layout-options" role="group" aria-label="Preview layout">
+        <button type="button" class="layout-button" aria-label="Preview below list"
+          title="Preview below list" aria-pressed={previewLayout === 'bottom'}
+          onmousedown={keepFocus} onclick={() => (previewLayout = 'bottom')}>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3" width="15" height="14" rx="2" /><path d="M3 11h14" /></svg>
+        </button>
+        <button type="button" class="layout-button" aria-label="Preview on right"
+          title="Preview on right" aria-pressed={previewLayout === 'right'}
+          onmousedown={keepFocus} onclick={() => (previewLayout = 'right')}>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3" width="15" height="14" rx="2" /><path d="M11 3v14" /></svg>
+        </button>
+      </div>
+      <span class="history-count">{palette.total} {palette.total === 1 ? 'clip' : 'clips'}</span>
+    </div>
   </div>
   <div class="search-wrap">
     <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -188,6 +206,7 @@
     <kbd class="search-key">⌘ ⇧ V</kbd>
   </div>
 
+  <div class="filter-bar">
   <div class="tabs" data-testid="tabs" role="group" aria-label="Tabs">
     {#each tabs as t (t.label)}
       <button
@@ -210,6 +229,23 @@
       onmousedown={keepFocus}
       onclick={() => palette.openTagging()}>+ Tab</button
     >
+  </div>
+  <div class="type-filter" class:type-filter-active={palette.activeKind !== 'all'}>
+    <svg class="filter-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 5h18l-7 8v5l-4 2v-7Z" />
+    </svg>
+    <select
+      aria-label="Filter by type"
+      title="Filter clipboard content by type"
+      value={palette.activeKind}
+      onchange={(event) => (palette.pending = palette.selectKind(event.currentTarget.value as KindFilter))}
+    >
+      {#each KIND_FILTERS as filter (filter.value)}
+        <option value={filter.value}>{filter.label}</option>
+      {/each}
+    </select>
+    <svg class="filter-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+  </div>
   </div>
 
   {#if palette.titleEditing}
@@ -275,7 +311,7 @@
     <div class="status-row" data-testid="status-text" role="status">{palette.statusText}</div>
   {/if}
 
-  <SplitPane>
+  <SplitPane layout={previewLayout}>
   {#snippet list()}
   <div
     bind:this={listEl}

@@ -1,22 +1,35 @@
 <script lang="ts">
   import type { Snippet } from 'svelte'
 
-  let { list, preview }: { list: Snippet; preview: Snippet } = $props()
+  let { list, preview, layout = 'bottom' }: { list: Snippet; preview: Snippet; layout?: 'bottom' | 'right' } = $props()
   let container: HTMLDivElement | null = $state(null)
   let height = $state(400)
-  let proportion = $state(0.72)
+  let width = $state(720)
+  let bottomProportion = $state(0.72)
+  let rightProportion = $state(0.6)
   let pointer: number | null = $state(null)
   let pointerOffset = 0
-  const dividerHeight = 12
-  const minimum = $derived(Math.min(0.5, 88 / Math.max(1, height - dividerHeight)))
-  const maximum = $derived(1 - minimum)
-  const fraction = $derived(Math.max(minimum, Math.min(maximum, proportion)))
+  const dividerSize = 12
+  const sideBySide = $derived(layout === 'right')
+  const available = $derived(Math.max(1, (sideBySide ? width : height) - dividerSize))
+  const listMinimum = $derived(sideBySide ? 320 : 88)
+  const previewMinimum = $derived(sideBySide ? 200 : 88)
+  const minimumShare = $derived(listMinimum / (listMinimum + previewMinimum))
+  const minimum = $derived(Math.min(minimumShare, listMinimum / available))
+  const maximum = $derived(Math.max(minimumShare, 1 - previewMinimum / available))
+  const fraction = $derived(Math.max(minimum, Math.min(maximum, sideBySide ? rightProportion : bottomProportion)))
+
+  function setProportion(value: number): void {
+    if (sideBySide) rightProportion = value
+    else bottomProportion = value
+  }
 
   $effect(() => {
     if (container === null || typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver((entries) => {
-      const next = entries[0]?.contentRect.height ?? 0
-      if (next > 0) height = next
+      const bounds = entries[0]?.contentRect
+      if (bounds !== undefined && bounds.height > 0) height = bounds.height
+      if (bounds !== undefined && bounds.width > 0) width = bounds.width
     })
     observer.observe(container)
     return () => observer.disconnect()
@@ -26,7 +39,8 @@
     if (event.button !== 0 || container === null) return
     event.preventDefault()
     const divider = event.currentTarget as HTMLElement
-    pointerOffset = event.clientY - divider.getBoundingClientRect().top
+    const bounds = divider.getBoundingClientRect()
+    pointerOffset = sideBySide ? event.clientX - bounds.left : event.clientY - bounds.top
     pointer = event.pointerId
     divider.setPointerCapture(event.pointerId)
   }
@@ -34,9 +48,10 @@
   function resize(event: PointerEvent): void {
     if (pointer !== event.pointerId || container === null) return
     const bounds = container.getBoundingClientRect()
-    if (bounds.height <= dividerHeight) return
-    proportion = Math.max(minimum, Math.min(maximum,
-      (event.clientY - bounds.top - pointerOffset) / (bounds.height - dividerHeight)))
+    const size = sideBySide ? bounds.width : bounds.height
+    if (size <= dividerSize) return
+    const position = sideBySide ? event.clientX - bounds.left : event.clientY - bounds.top
+    setProportion(Math.max(minimum, Math.min(maximum, (position - pointerOffset) / (size - dividerSize))))
   }
 
   function stopResize(event: PointerEvent): void {
@@ -49,17 +64,19 @@
   function keyResize(event: KeyboardEvent): void {
     if (event.key === 'Escape') return
     event.stopPropagation()
-    if (!['ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', ' '].includes(event.key)) return
+    const decrease = sideBySide ? 'ArrowLeft' : 'ArrowUp'
+    const increase = sideBySide ? 'ArrowRight' : 'ArrowDown'
+    if (![decrease, increase, 'Home', 'End', 'Enter', ' '].includes(event.key)) return
     event.preventDefault()
-    if (event.key === 'ArrowUp') proportion = Math.max(minimum, fraction - 0.05)
-    if (event.key === 'ArrowDown') proportion = Math.min(maximum, fraction + 0.05)
-    if (event.key === 'Home') proportion = minimum
-    if (event.key === 'End') proportion = maximum
+    if (event.key === decrease) setProportion(Math.max(minimum, fraction - 0.05))
+    if (event.key === increase) setProportion(Math.min(maximum, fraction + 0.05))
+    if (event.key === 'Home') setProportion(minimum)
+    if (event.key === 'End') setProportion(maximum)
   }
 </script>
 
-<div class="content-panes" class:resizing={pointer !== null} bind:this={container}
-  style={`--list-fraction: ${fraction}; --divider-height: ${dividerHeight}px`}>
+<div class="content-panes" class:side-by-side={sideBySide} class:resizing={pointer !== null} bind:this={container}
+  style={`--list-fraction: ${fraction}; --divider-size: ${dividerSize}px`}>
   {@render list()}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (A focusable separator implements the ARIA window splitter pattern.) -->
   <div
@@ -67,7 +84,7 @@
     role="separator"
     tabindex="0"
     aria-label="Resize preview"
-    aria-orientation="horizontal"
+    aria-orientation={sideBySide ? 'vertical' : 'horizontal'}
     aria-controls="cairn-results cairn-preview"
     aria-valuemin={Math.round(minimum * 100)}
     aria-valuemax={Math.round(maximum * 100)}
@@ -80,7 +97,7 @@
     onpointercancel={stopResize}
     onlostpointercapture={() => { pointer = null }}
     onkeydown={keyResize}
-    ondblclick={() => { proportion = 0.72 }}
+    ondblclick={() => setProportion(sideBySide ? 0.6 : 0.72)}
   ><span></span></div>
   {@render preview()}
 </div>

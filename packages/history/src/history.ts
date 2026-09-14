@@ -66,6 +66,7 @@ export interface ListResult {
 }
 /** What `search` may be narrowed by, so a query typed inside a tab searches that tab. */
 export interface SearchFilter {
+  readonly kind?: ItemKind
   readonly pinnedOnly?: boolean
   readonly tag?: string
 }
@@ -385,16 +386,18 @@ export function createHistory(deps: HistoryDeps): History {
     },
 
     search(q, limit, filter = {}) {
-      if (!previewsLoaded) return []
+      if (!previewsLoaded || limit < 1) return []
       const now = clock.now()
       const tag = filter.tag === undefined ? '' : normalizeTag(filter.tag)
       const out: ScoredItem[] = []
-      for (const hit of search.query(q, limit)) {
+      for (const hit of search.query(q, search.size)) {
         const it = items.get(hit.id)
         if (it === undefined || !isLive(it, now)) continue
+        if (filter.kind !== undefined && it.kind !== filter.kind) continue
         if (filter.pinnedOnly === true && !it.pinned) continue
         if (tag !== '' && !it.tags.includes(tag)) continue
         out.push({ item: it, score: hit.score, ranges: hit.ranges })
+        if (out.length >= limit) break
       }
       return out
     },

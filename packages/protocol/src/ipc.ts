@@ -95,6 +95,7 @@ export const IpcRequestSchema = {
     params: z.object({
       q: z.string().max(256),
       limit: z.int().min(1).max(200),
+      kind: z.enum(['text', 'richtext', 'image', 'files']).optional(),
       pinnedOnly: z.boolean().default(false),
       tag: TagSchema.optional(),
     }),

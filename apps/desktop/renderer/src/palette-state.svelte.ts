@@ -58,6 +58,15 @@ export type ActiveTab =
 export const ALL_TAB: ActiveTab = { kind: 'all' }
 export const PINNED_TAB: ActiveTab = { kind: 'pinned' }
 
+export type KindFilter = ItemKind | 'all'
+export const KIND_FILTERS = [
+  { value: 'all', label: 'All types', empty: '' },
+  { value: 'text', label: 'Text', empty: 'No text clips here' },
+  { value: 'richtext', label: 'Rich text', empty: 'No rich text clips here' },
+  { value: 'image', label: 'Images', empty: 'No images here' },
+  { value: 'files', label: 'Files', empty: 'No files here' },
+] as const satisfies readonly { value: KindFilter; label: string; empty: string }[]
+
 export function sameTab(a: ActiveTab, b: ActiveTab): boolean {
   if (a.kind !== b.kind) return false
   return a.kind !== 'tag' || b.kind !== 'tag' || a.tag === b.tag
@@ -255,6 +264,7 @@ export class PaletteState {
   tabs: Tab[] = $state([])
   pinnedCount = $state(0)
   activeTab: ActiveTab = $state(ALL_TAB)
+  activeKind: KindFilter = $state('all')
   /** The inline "file this into a tab" field. Open only while the user is typing a tab name. */
   tagging = $state(false)
   tagDraft = $state('')
@@ -308,6 +318,10 @@ export class PaletteState {
   /** What the empty list should say, which depends entirely on WHY it is empty. */
   get emptyText(): string {
     if (this.mode === 'search') return NO_RESULTS_TEXT
+    if (this.activeKind !== 'all') {
+      const label = KIND_FILTERS.find((filter) => filter.value === this.activeKind)!.empty
+      return `${label} — try All types or another tab.`
+    }
     if (this.activeTab.kind === 'pinned') return EMPTY_PINNED_TEXT
     if (this.activeTab.kind === 'tag') return EMPTY_TAB_TEXT
     return EMPTY_TEXT
@@ -358,6 +372,7 @@ export class PaletteState {
         // The tab resets with the query, for the same reason: the palette is opened to find the thing
         // you just copied far more often than to return to a tab you were in an hour ago.
         this.activeTab = ALL_TAB
+        this.activeKind = 'all'
         this.closeTagging()
         this.closeTitleEditing()
         this.hidePreview()
@@ -406,7 +421,7 @@ export class PaletteState {
     this.mode = 'search'
     const seq = ++this.#listSeq
     try {
-      const res = await this.#deps.api.search({ q, limit: SEARCH_LIMIT, ...tabFilter(this.activeTab) })
+      const res = await this.#deps.api.search({ q, limit: SEARCH_LIMIT, ...this.#filters() })
       if (seq !== this.#listSeq) return
       this.rows = res.results.map((r) => r.item)
       this.rangesByIndex = res.results.map((r) => [...r.ranges])
@@ -467,7 +482,7 @@ export class PaletteState {
       const res = await this.#deps.api.list({
         limit: Math.min(200, Math.max(FETCH_SPAN, this.viewportRows + OVERSCAN_ROWS * 2)),
         offset,
-        ...tabFilter(this.activeTab),
+        ...this.#filters(),
       })
       if (seq !== this.#listSeq) return
       this.rows = [...res.items]
@@ -554,16 +569,33 @@ export class PaletteState {
   async selectTab(tab: ActiveTab): Promise<void> {
     if (sameTab(tab, this.activeTab)) return
     this.activeTab = tab
+    await this.#reloadFilter()
+  }
+
+  async selectKind(kind: KindFilter): Promise<void> {
+    if (kind === this.activeKind || !KIND_FILTERS.some((filter) => filter.value === kind)) return
+    this.activeKind = kind
+    await this.#reloadFilter()
+  }
+
+  #filters(): { pinnedOnly: boolean; tag?: string; kind?: ItemKind } {
+    return {
+      ...tabFilter(this.activeTab),
+      ...(this.activeKind === 'all' ? {} : { kind: this.activeKind }),
+    }
+  }
+
+  async #reloadFilter(): Promise<void> {
     this.selectedIndex = 0
     this.windowStart = 0
+    this.rows = []
+    this.rowsOffset = 0
+    this.rangesByIndex = []
+    this.total = 0
     this.closeTagging()
     this.closeTitleEditing()
     this.hidePreview()
-    if (this.mode === 'search' && this.query.trim().length > 0) {
-      await this.setQuery(this.query)
-      return
-    }
-    await this.reload()
+    await this.setQuery(this.query)
   }
 
   /** Opens the tab-name field for the selected row. There is no separate "create a tab" step: a tab

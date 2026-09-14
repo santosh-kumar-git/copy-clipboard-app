@@ -137,6 +137,51 @@ describe('labels', () => {
 })
 
 describe('PaletteState', () => {
+  it('discards a slow type-filter reply after the user chooses another type', async () => {
+    const fake = createFakeApi({ items: [
+      makeItem(0, { kind: 'image' }), makeItem(1, { kind: 'files' }), makeItem(2),
+    ] })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    fake.deferred = true
+    const images = state.selectKind('image')
+    const files = state.selectKind('files')
+    expect(state.selectedItem).toBeNull()
+    expect(state.previewText).toBe('')
+    fake.deferred = false
+    fake.pending[1]!()
+    await files
+    expect(state.selectedItem?.kind).toBe('files')
+    fake.pending[0]!()
+    await images
+    expect(state.activeKind).toBe('files')
+    expect(state.selectedItem?.kind).toBe('files')
+    state.dispose()
+  })
+
+  it('keeps the selected type while paging and clears a revealed preview when changing type', async () => {
+    const image = makeItem(0, { kind: 'image', title: 'Private screenshot' })
+    const imageDataUrl = 'data:image/png;base64,iVBORw0KGgo='
+    const fake = createFakeApi({
+      items: [image, ...Array.from({ length: 100 }, (_, i) => makeItem(i + 1))],
+      previews: new Map([[image.id, { text: '', isHtmlSource: false, truncated: false, imageDataUrl }]]),
+    })
+    const state = new PaletteState({ api: fake.api, clock: createTestClock() })
+    await state.start()
+    await state.revealPreview()
+    expect(state.previewImageUrl).toBe(imageDataUrl)
+    await state.selectKind('text')
+    expect(state.previewImageUrl).toBeNull()
+    state.setScrollTop(60 * ROW_HEIGHT_PX)
+    await state.pending
+    expect(fake.listCalls.at(-1)).toMatchObject({ kind: 'text', offset: 58 })
+    expect(state.visibleRows.every(row => row.item?.kind === 'text')).toBe(true)
+    await state.selectKind('image')
+    expect(state.contentHidden).toBe(true)
+    expect(state.previewImageUrl).toBeNull()
+    state.dispose()
+  })
+
   it('loads the preview after keyboard navigation reaches an uncached page', async () => {
     const last = makeItem(499)
     const fake = createFakeApi({

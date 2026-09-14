@@ -69,6 +69,23 @@ describe('inbound params are validated (main side)', () => {
     expect(bad.error?.issues[0]?.message).toBe('Invalid input: expected int, received number')
   })
 
+  it.each(['text', 'richtext', 'image', 'files'])('preserves the exact %s kind in list and search params', (kind) => {
+    const list = { limit: 10, offset: 0, kind, tag: 'work', pinnedOnly: true }
+    const search = { q: 'report', limit: 10, kind, tag: 'work', pinnedOnly: true }
+    expect(IpcRequestSchema['cairn:history.list'].params.parse(list)).toEqual(list)
+    expect(IpcRequestSchema['cairn:history.search'].params.parse(search)).toEqual(search)
+  })
+
+  it('allows searching all kinds when kind is omitted', () => {
+    expect(IpcRequestSchema['cairn:history.search'].params.parse({ q: 'report', limit: 10 })).toEqual({
+      q: 'report', limit: 10, pinnedOnly: false,
+    })
+  })
+
+  it.each(['all', 'Text', 'file', '', null, 42, {}, ['image']].map((kind) => ({ kind })))('rejects an invalid search kind $kind', ({ kind }) => {
+    expect(IpcRequestSchema['cairn:history.search'].params.safeParse({ q: 'report', limit: 10, kind }).success).toBe(false)
+  })
+
   it('refuses an id that is not a 26-char Crockford ItemId', () => {
     const params = IpcRequestSchema['cairn:history.preview'].params
     expect(params.safeParse({ id: '01KDVDNA00000G40R40M30E209' }).success).toBe(true)

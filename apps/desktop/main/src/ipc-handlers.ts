@@ -97,8 +97,9 @@ const HANDLERS: Record<IpcRequestChannel, Handler> = {
     })
   },
   'cairn:history.search': async (params, deps) => {
-    const p = params as { q: string; limit: number; pinnedOnly: boolean; tag?: string }
+    const p = params as { q: string; limit: number; kind?: Item['kind']; pinnedOnly: boolean; tag?: string }
     const results = deps.history.search(p.q, p.limit, {
+      ...(p.kind === undefined ? {} : { kind: p.kind }),
       pinnedOnly: p.pinnedOnly,
       ...(p.tag === undefined ? {} : { tag: p.tag }),
     })

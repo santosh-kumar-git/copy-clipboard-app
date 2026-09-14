@@ -119,11 +119,9 @@ export function createFakeApi(
 
   /** The fake filters and counts the same way main does, so a tab test proves the wiring rather than
    *  the fake's opinion of it. */
-  const matching = (p: { pinnedOnly?: boolean; tag?: string | undefined }): ItemSummary[] =>
-    fake.items.filter(
-      (it) =>
-        (p.pinnedOnly !== true || it.pinned) && (p.tag === undefined || it.tags.includes(p.tag)),
-    )
+  const matches = (it: ItemSummary, p: Pick<ListParams, 'pinnedOnly' | 'tag' | 'kind'>): boolean =>
+    (p.pinnedOnly !== true || it.pinned) && (p.tag === undefined || it.tags.includes(p.tag)) &&
+    (p.kind === undefined || it.kind === p.kind)
   const tabsOf = (): { tag: string; count: number }[] => {
     const counts = new Map<string, number>()
     for (const it of fake.items) for (const t of it.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
@@ -137,7 +135,7 @@ export function createFakeApi(
     list: (params) => {
       fake.listCalls.push(params)
       if (fake.failList) return Promise.reject(new Error('E_IPC_REJECTED'))
-      const live = matching(params)
+      const live = fake.items.filter((item) => matches(item, params))
       return settle({
         items: live.slice(params.offset, params.offset + params.limit),
         total: live.length,
@@ -148,7 +146,7 @@ export function createFakeApi(
     search: (params) => {
       fake.searchCalls.push(params)
       return settle({
-        results: fake.searchHitsFor(params.q).slice(0, params.limit),
+        results: fake.searchHitsFor(params.q).filter((hit) => matches(hit.item, params)).slice(0, params.limit),
         tabs: tabsOf(),
         pinnedCount: pinnedCount(),
       })

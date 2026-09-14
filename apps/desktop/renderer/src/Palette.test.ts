@@ -109,6 +109,90 @@ describe('the palette shell', () => {
   })
 })
 
+describe('content type filters', () => {
+  async function chooseType(value: string, state: PaletteState): Promise<void> {
+    const picker = host.querySelector<HTMLSelectElement>('[aria-label="Filter by type"]')
+    expect(picker).not.toBeNull()
+    picker!.value = value
+    picker!.dispatchEvent(new Event('change', { bubbles: true }))
+    await state.pending
+    flushSync()
+  }
+
+  it('filters the whole history by type and restores all types without copying', async () => {
+    const fake = createFakeApi({ items: [
+      ...Array.from({ length: 60 }, (_, i) => makeItem(i)),
+      makeItem(60, { kind: 'image', title: 'Holiday photo' }),
+      makeItem(61, { kind: 'richtext' }),
+      makeItem(62, { kind: 'files' }),
+    ] })
+    const state = await render(fake)
+    await chooseType('image', state)
+    expect(rows()).toHaveLength(1)
+    expect(rows()[0]?.textContent).toContain('Holiday photo')
+    expect(state.total).toBe(1)
+    expect(fake.listCalls.at(-1)).toEqual({ limit: 32, offset: 0, pinnedOnly: false, kind: 'image' })
+    expect(host.querySelector('[data-testid="hidden-content"]')).not.toBeNull()
+    await chooseType('richtext', state)
+    expect(rows()).toHaveLength(1)
+    expect(rows()[0]?.querySelector('.chip')?.textContent).toBe('Rich text')
+    await chooseType('files', state)
+    expect(rows()).toHaveLength(1)
+    expect(rows()[0]?.querySelector('.chip')?.textContent).toBe('Files')
+    await chooseType('all', state)
+    expect(state.total).toBe(63)
+    expect(fake.listCalls.at(-1)?.kind).toBeUndefined()
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
+  it('combines type with tabs and search, then resets it when reopened', async () => {
+    const items = [
+      makeItem(0, { kind: 'image', title: 'Invoice scan', pinned: true, tags: ['work'] }),
+      makeItem(1, { kind: 'text', preview: 'Invoice notes', pinned: true, tags: ['work'] }),
+      makeItem(2, { kind: 'image', title: 'Invoice personal' }),
+    ]
+    const fake = createFakeApi({ items, searchHitsFor: () => items.map(item => ({ item, score: 1, ranges: [] })) })
+    const state = await render(fake)
+    await state.selectTab({ kind: 'tag', tag: 'work' })
+    await state.setQuery('Invoice')
+    await chooseType('image', state)
+    expect(state.query).toBe('Invoice')
+    expect(rows()).toHaveLength(1)
+    expect(fake.searchCalls.at(-1)).toEqual({ q: 'Invoice', limit: 50, pinnedOnly: false, tag: 'work', kind: 'image' })
+    await state.selectTab({ kind: 'pinned' })
+    flushSync()
+    expect(fake.searchCalls.at(-1)).toEqual({ q: 'Invoice', limit: 50, pinnedOnly: true, kind: 'image' })
+    expect(rows()).toHaveLength(1)
+    fake.emitPaletteShown({ shownAt: 5678 })
+    await state.pending
+    flushSync()
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Filter by type"]')?.value).toBe('all')
+    expect(state.total).toBe(3)
+    state.dispose()
+  })
+
+  it('explains an empty type filter and lets the picker own its keyboard events', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+    const picker = host.querySelector<HTMLSelectElement>('[aria-label="Filter by type"]')
+    expect(picker).not.toBeNull()
+    for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' ']) {
+      picker!.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    }
+    expect(state.selectedIndex).toBe(0)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    await chooseType('image', state)
+    expect(host.querySelector('[data-testid="empty"]')?.textContent).toBe('No images here — try All types or another tab.')
+    picker!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await state.pending
+    expect(fake.closeCalls).toBe(1)
+    state.dispose()
+  })
+})
+
 describe('the virtualised result list', () => {
   it('renders a bounded window of rows for 500 items, not 500 rows', async () => {
     const fake = createFakeApi({ items: Array.from({ length: 500 }, (_, i) => makeItem(i)) })
@@ -275,6 +359,75 @@ describe('pin and delete', () => {
 })
 
 describe('the preview pane', () => {
+  it('switches between bottom and right previews without copying, and keeps the layout on reopening', async () => {
+    const fake = createFakeApi({ items: [makeItem(0), makeItem(1)] })
+    const state = await render(fake)
+    const right = host.querySelector<HTMLButtonElement>('[aria-label="Preview on right"]')
+    expect(right).not.toBeNull()
+    right!.click()
+    flushSync()
+    const divider = host.querySelector<HTMLElement>('[role="separator"]')!
+    expect(host.querySelector('.content-panes.side-by-side')).not.toBeNull()
+    expect(divider.getAttribute('aria-orientation')).toBe('vertical')
+    expect(right!.getAttribute('aria-pressed')).toBe('true')
+    const initial = Number(divider.getAttribute('aria-valuenow'))
+    divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))
+    flushSync()
+    const changed = Number(divider.getAttribute('aria-valuenow'))
+    expect(changed).toBeLessThan(initial)
+    expect(state.selectedIndex).toBe(0)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    fake.emitPaletteShown({ shownAt: 9876 })
+    await state.pending
+    flushSync()
+    expect(divider.getAttribute('aria-orientation')).toBe('vertical')
+    expect(Number(divider.getAttribute('aria-valuenow'))).toBe(changed)
+    host.querySelector<HTMLButtonElement>('[aria-label="Preview below list"]')!.click()
+    flushSync()
+    expect(divider.getAttribute('aria-orientation')).toBe('horizontal')
+    expect(host.querySelector('.content-panes.side-by-side')).toBeNull()
+    right!.click()
+    flushSync()
+    expect(Number(divider.getAttribute('aria-valuenow'))).toBe(changed)
+    state.dispose()
+  })
+
+  it('resizes a right-side preview horizontally and resets its divider on double-click', async () => {
+    const fake = createFakeApi({ items: [makeItem(0)] })
+    const state = await render(fake)
+    host.querySelector<HTMLButtonElement>('[aria-label="Preview on right"]')!.click()
+    flushSync()
+    const container = host.querySelector<HTMLElement>('.content-panes')!
+    const divider = host.querySelector<HTMLElement>('[role="separator"]')!
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 100, 720, 400))
+    vi.spyOn(divider, 'getBoundingClientRect').mockReturnValue(new DOMRect(435, 100, 12, 400))
+    divider.setPointerCapture = vi.fn()
+    divider.hasPointerCapture = () => true
+    divider.releasePointerCapture = vi.fn()
+    const pointer = (type: string, x: number, y = 200) => {
+      const event = new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'pointerId', { value: 1 })
+      divider.dispatchEvent(event)
+      flushSync()
+    }
+    pointer('pointerdown', 441)
+    pointer('pointermove', 541)
+    expect(Number(divider.getAttribute('aria-valuenow'))).toBeGreaterThan(60)
+    const moved = divider.getAttribute('aria-valuenow')
+    pointer('pointermove', 541, 300)
+    expect(divider.getAttribute('aria-valuenow')).toBe(moved)
+    pointer('pointerup', 541)
+    pointer('pointermove', 441)
+    expect(divider.getAttribute('aria-valuenow')).toBe(moved)
+    divider.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    flushSync()
+    expect(Number(divider.getAttribute('aria-valuenow'))).toBe(60)
+    expect(fake.copyCalls).toEqual([])
+    expect(fake.closeCalls).toBe(0)
+    state.dispose()
+  })
+
   it('reveals an image without copying and removes it from the DOM on reopening', async () => {
     const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO8sAAAAASUVORK5CYII='
     const item = makeItem(0, { kind: 'image', title: 'Private screenshot', preview: '' })

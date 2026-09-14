@@ -12,7 +12,7 @@ import {
   type Unsub,
 } from '@cairn/protocol'
 import type { ChangeReason } from '@cairn/history'
-import type { History } from '@cairn/history'
+import type { History, SearchFilter } from '@cairn/history'
 import {
   registerIpcHandlers,
   sendIpcEvent,
@@ -85,6 +85,7 @@ interface Harness {
   readonly events: string[]
   readonly domainCalls: string[]
   readonly titles: { id: ItemId; title: string | null }[]
+  readonly searches: { q: string; limit: number; filter: SearchFilter | undefined }[]
   readonly unregister: Unsub
 }
 
@@ -93,6 +94,7 @@ function harness(over: { historyItems?: readonly Item[]; readyResult?: boolean }
   const { logger, events } = silentLogger()
   const domainCalls: string[] = []
   const titles: { id: ItemId; title: string | null }[] = []
+  const searches: Harness['searches'] = []
   const items = over.historyItems ?? [item()]
 
   const history = {
@@ -102,8 +104,9 @@ function harness(over: { historyItems?: readonly Item[]; readyResult?: boolean }
       domainCalls.push(`list ${JSON.stringify(q)}`)
       return { items, total: items.length }
     },
-    search: (q: string, limit: number): readonly ScoredItem[] => {
+    search: (q: string, limit: number, filter?: SearchFilter): readonly ScoredItem[] => {
       domainCalls.push(`search ${q} ${limit}`)
+      searches.push({ q, limit, filter })
       return items.map((it) => ({ item: it, score: 1, ranges: [0, 4] }))
     },
     resolveReps: async (): Promise<Result<readonly ResolvedRep[]>> => ok([]),
@@ -164,7 +167,7 @@ function harness(over: { historyItems?: readonly Item[]; readyResult?: boolean }
     logger,
   })
 
-  return { ipc, events, domainCalls, titles, unregister }
+  return { ipc, events, domainCalls, titles, searches, unregister }
 }
 
 describe('registration', () => {
@@ -239,6 +242,15 @@ describe('params validation — a malformed renderer message is rejected, not tr
     expect(h.domainCalls).toEqual([])
   })
 
+  it.each(['all', 'Text', 'file', '', null, 42, {}, ['image']].map((kind) => ({ kind })))('rejects search kind $kind before any domain call', async ({ kind }) => {
+    const h = harness()
+    expect(await h.ipc.call('cairn:history.search', { q: 'report', limit: 10, kind })).toMatchObject({
+      ok: false, code: 'E_IPC_REJECTED',
+    })
+    expect(h.domainCalls).toEqual([])
+    expect(h.events).toContain('warn:ipc.rejected')
+  })
+
   it('rejects a malformed ItemId rather than passing it to the store', async () => {
     const h = harness()
     for (const bad of ['', 'not-an-id', '01kdvdna00041061050r3gg28a', '../../etc/passwd']) {
@@ -283,7 +295,18 @@ describe('the happy paths', () => {
     const reply = await h.ipc.call('cairn:history.search', { q: 'aki', limit: 25 }) as
       { ok: true; value: { results: { score: number; ranges: number[] }[] } }
     expect(h.domainCalls).toEqual(['search aki 25'])
+    expect(h.searches).toEqual([{ q: 'aki', limit: 25, filter: { pinnedOnly: false } }])
     expect(reply.value.results[0]!.ranges).toEqual([0, 4])
+  })
+
+  it.each(['text', 'richtext', 'image', 'files'])('forwards search kind %s together with tab and pin filters', async (kind) => {
+    const h = harness()
+    expect(await h.ipc.call('cairn:history.search', {
+      q: 'report', limit: 2, kind, tag: 'work', pinnedOnly: true,
+    })).toMatchObject({ ok: true })
+    expect(h.searches).toEqual([{
+      q: 'report', limit: 2, filter: { kind, tag: 'work', pinnedOnly: true },
+    }])
   })
 
   it('preview labels HTML as source and never as markup', async () => {
@@ -442,7 +465,7 @@ describe('title IPC', () => {
   it('redacts titled list/search results and fetches content only for an explicit preview request', async () => {
     const h = harness({ historyItems: [item({ title: 'Credential' })] })
     const listed = await h.ipc.call('cairn:history.list', { limit: 10, offset: 0 })
-    const searched = await h.ipc.call('cairn:history.search', { q: 'Credential', limit: 10 })
+    const searched = await h.ipc.call('cairn:history.search', { q: 'Credential', limit: 10, kind: 'text' })
     expect(listed).toMatchObject({ ok: true, value: { items: [{ title: 'Credential', preview: '', thumbnailDataUrl: null }] } })
     expect(searched).toMatchObject({ ok: true, value: { results: [{ item: { title: 'Credential', preview: '' } }] } })
     expect(JSON.stringify([listed, searched])).not.toContain('AKIA')

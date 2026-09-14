@@ -7,6 +7,7 @@ import {
   createTestClock,
   type Candidate,
   type Item,
+  type ItemKind,
   type ResolvedRep,
 } from '@cairn/protocol'
 import { DEFAULT_RULES, classify, mask } from '@cairn/privacy'
@@ -58,6 +59,131 @@ async function add(history: History, input: Candidate): Promise<Item> {
   if (result.value.outcome !== 'added') throw new Error(`expected added, got ${result.value.outcome}`)
   return result.value.item
 }
+
+describe('kind filters and result limits', () => {
+  async function addTyped(history: History, kind: ItemKind, label: string): Promise<Item> {
+    const mime = { text: 'text/plain', richtext: 'text/html', image: 'image/png', files: 'text/uri-list' }[kind]
+    const primary = rep(mime, label)
+    const item = await add(history, {
+      ...candidate(label), kind, reps: [primary], contentHash: primary.sha256,
+      primaryText: kind === 'image' ? null : label,
+    })
+    expect((await history.setTitle(item.id, 'warehouse report')).ok).toBe(true)
+    return item
+  }
+
+  it.each(['text', 'richtext', 'image', 'files'] as const)(
+    'finds %s matches beyond the first unfiltered page and preserves ranking',
+    async (kind) => {
+      const { history, clock, index } = harness()
+      await addTyped(history, kind, 'oldest target')
+      clock.advance(1)
+      const middle = await addTyped(history, kind, 'middle target')
+      clock.advance(1)
+      const newest = await addTyped(history, kind, 'newest target')
+      const otherKind = kind === 'text' ? 'richtext' : 'text'
+      for (const label of ['other one', 'other two', 'other three']) {
+        clock.advance(1)
+        await addTyped(history, otherKind, label)
+      }
+
+      expect(index.query('warehouse', 2).map((hit) => hit.id)).not.toContain(newest.id)
+      expect(history.search('warehouse', 2, { kind })).toMatchObject([
+        { item: { id: newest.id, kind }, score: 1 / 4, ranges: [0, 9] },
+        { item: { id: middle.id, kind }, score: 1 / 5, ranges: [0, 9] },
+      ])
+      expect(history.search('', 2, { kind }).map((hit) => hit.item.id)).toEqual([newest.id, middle.id])
+      expect(history.search('nonexistent', 2, { kind })).toEqual([])
+    },
+  )
+
+  it('intersects kind, normalized tab and pin filters before applying the limit', async () => {
+    const { history, clock } = harness()
+    const target = await addTyped(history, 'files', 'target')
+    expect((await history.tag(target.id, 'work', true)).ok).toBe(true)
+    expect((await history.pin(target.id, true)).ok).toBe(true)
+    for (const [kind, tag, pinned] of [
+      ['text', 'work', true], ['files', 'personal', true], ['files', 'work', false],
+    ] as const) {
+      clock.advance(1)
+      const other = await addTyped(history, kind, `other ${kind} ${tag}`)
+      expect((await history.tag(other.id, tag, true)).ok).toBe(true)
+      expect((await history.pin(other.id, pinned)).ok).toBe(true)
+    }
+
+    expect(history.search('warehouse', 1, { kind: 'files', tag: '  WORK  ', pinnedOnly: true }))
+      .toMatchObject([{ item: { id: target.id }, score: 1 / 4, ranges: [0, 9] }])
+    expect(history.search('warehouse', 1, { kind: 'files', tag: 'missing', pinnedOnly: true })).toEqual([])
+  })
+
+  it.each([{ tag: 'work' }, { pinnedOnly: true }])('fills a limited search with a later match for %j', async (filter) => {
+    const { history, clock } = harness()
+    const target = await addTyped(history, 'text', 'target')
+    expect((await history.tag(target.id, 'work', true)).ok).toBe(true)
+    expect((await history.pin(target.id, true)).ok).toBe(true)
+    clock.advance(1)
+    await addTyped(history, 'text', 'newer unfiled and unpinned')
+    expect(history.search('warehouse', 1, filter).map((hit) => hit.item.id)).toEqual([target.id])
+  })
+
+  it('skips expired and missing hits before applying the limit', async () => {
+    const { history, clock, index } = harness()
+    const target = await addTyped(history, 'text', 'live target')
+    clock.advance(1)
+    const expired = await addTyped(history, 'text', 'AKIA2E0PQIN4XA7QD')
+    clock.advance(1)
+    const missing = await addTyped(history, 'text', 'removed target')
+    expect((await history.remove(missing.id)).ok).toBe(true)
+    index.add({
+      id: missing.id, preview: 'warehouse report', pinned: false, tagged: false,
+      updatedAt: clock.now(), ord: 100,
+    })
+    clock.advance(SECRET_TTL_MS)
+
+    expect(history.get(expired.id)?.expiresAt).toBeLessThanOrEqual(clock.now())
+    expect(index.query('warehouse', 2).map((hit) => hit.id)).toEqual([missing.id, expired.id])
+    expect(history.search('warehouse', 1).map((hit) => hit.item.id)).toEqual([target.id])
+  })
+
+  it.each([0, -1])('returns no matches for limit %s', async (limit) => {
+    const { history } = harness()
+    await addTyped(history, 'files', 'target')
+    expect(history.search('warehouse', limit, { kind: 'files' })).toEqual([])
+  })
+
+  it('counts kind-filtered list totals before pagination while keeping global tab and pin counts', async () => {
+    const { history, clock } = harness()
+    const targets: Item[] = []
+    for (const label of ['oldest', 'middle', 'newest']) {
+      for (const kind of ['files', 'text'] as const) {
+        clock.advance(1)
+        const item = await addTyped(history, kind, `${label} ${kind}`)
+        expect((await history.tag(item.id, 'work', true)).ok).toBe(true)
+        expect((await history.pin(item.id, true)).ok).toBe(true)
+        if (kind === 'files') targets.push(item)
+      }
+    }
+    const filter = { kind: 'files', tag: 'work', pinnedOnly: true, limit: 1 } as const
+    for (const [offset, target] of [...targets].reverse().entries()) {
+      const page = history.list({ ...filter, offset })
+      expect(page.items.map((item) => item.id)).toEqual([target.id])
+      expect(page.total).toBe(3)
+    }
+    expect(history.list({ ...filter, offset: 3 })).toEqual({ items: [], total: 3 })
+    expect(history.list({ kind: 'image', limit: 1 })).toEqual({ items: [], total: 0 })
+    expect(history.tabs()).toEqual([{ tag: 'work', count: 6 }])
+    expect(history.pinnedCount()).toBe(6)
+  })
+
+  it('searches the title only and keeps typed searches empty while previews are evicted', async () => {
+    const { history } = harness()
+    const target = await addTyped(history, 'files', 'confidential body')
+    expect(history.search('confidential', 1, { kind: 'files' })).toEqual([])
+    expect(history.search('warehouse', 1, { kind: 'files' }).map((hit) => hit.item.id)).toEqual([target.id])
+    history.evictPreviewCache()
+    expect(history.search('warehouse', 1, { kind: 'files' })).toEqual([])
+  })
+})
 
 describe('classification of captured representations', () => {
   it.each(['text/plain', 'text/uri-list', 'text/html', 'text/rtf'])(

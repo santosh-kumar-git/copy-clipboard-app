@@ -125,6 +125,13 @@ images up to 8 MiB also appear in the preview. Drag the top bar to move the wind
 it; the size and position are remembered until you quit. Drag the divider above Preview to change its
 height, or focus the divider and use ↑↓. Double-click the divider to reset it.
 
+Use **All types** beside the tabs to filter by **Text**, **Rich text**, **Images**, or **Files**.
+The type filter works with search, Pinned, and your custom tabs. Reopening starts with all types again.
+
+The two layout buttons in the top bar put the preview **below the list** or **on the right**.
+In the right-side layout, drag the vertical divider or use ←→ while it is focused. Each layout keeps
+its divider position, and the chosen layout stays active until you quit.
+
 Signing, notarization, a login item and auto-update are Milestone 3.
 
 ## Settings
